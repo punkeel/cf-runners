@@ -1,7 +1,7 @@
 FROM ubuntu:24.04 AS runner-builder
 
-ARG RUNNER_VERSION=2.336.0
-ARG RUNNER_SOURCE_REVISION=98aabcd429c4e8402406c56ce2d26387fed3b9ce
+ARG RUNNER_VERSION=2.338.2
+ARG RUNNER_SOURCE_REVISION=d1eb12d4b115c301201de27d667284e1a80f2ab5
 
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends \
