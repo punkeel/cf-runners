@@ -52,6 +52,7 @@ RUN apt-get update \
     ca-certificates \
     cmake \
     curl \
+    docker.io \
     jq \
     ninja-build \
     openssh-client \
@@ -69,6 +70,9 @@ RUN apt-get update \
   && apt-get update \
   && apt-get install --yes --no-install-recommends git git-lfs \
   && useradd --create-home --shell /bin/bash runner \
+  # Fork (punkeel/cf-runners): the `runner` user talks to the in-container
+  # dockerd started by start-runner-root.sh through the docker group.
+  && usermod --append --groups docker runner \
   && mkdir --parents /home/runner/actions-runner \
   && mkdir --parents "${RUNNER_TOOL_CACHE}/node/${NODE_VERSION}" \
   && curl --fail --location --retry 3 \
@@ -90,6 +94,7 @@ RUN /home/runner/actions-runner/bin/installdependencies.sh \
   && chown --recursive runner:runner "${RUNNER_TOOL_CACHE}"
 
 COPY --chown=runner:runner docker/start-runner.sh /home/runner/start-runner.sh
+COPY docker/start-runner-root.sh /home/runner/start-runner-root.sh
 COPY --chown=runner:runner docker/invalid-runner-hook.sh /home/runner/invalid-runner-hook.sh
 COPY --chown=runner:runner docker/job-started-hook.sh /home/runner/job-started-hook.sh
 COPY docker/report-container-usage.sh /usr/local/bin/report-container-usage
@@ -99,6 +104,7 @@ COPY --chown=runner:runner docker/cf-resource-trace.sh /usr/local/bin/cf-resourc
 COPY --chown=runner:runner docker/runner-results-proxy.mjs /usr/local/bin/runner-results-proxy
 RUN chmod 0755 \
   /home/runner/start-runner.sh \
+  /home/runner/start-runner-root.sh \
   /home/runner/invalid-runner-hook.sh \
   /home/runner/job-started-hook.sh \
   /usr/local/bin/report-container-usage \
@@ -107,7 +113,10 @@ RUN chmod 0755 \
   /usr/local/bin/cf-resource-trace \
   /usr/local/bin/runner-results-proxy
 
-USER runner
+# Fork (punkeel/cf-runners): run as root so the entrypoint can start dockerd
+# and enable ip_forward; it drops back to the `runner` user immediately
+# after. Upstream ran directly as the `runner` user.
+USER root
 WORKDIR /home/runner/actions-runner
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/home/runner/start-runner.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/home/runner/start-runner-root.sh"]

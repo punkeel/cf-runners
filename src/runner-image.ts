@@ -9,6 +9,7 @@ export const RUNNER_IMAGE_INPUT_PATHS = [
   "docker/Dockerfile",
   "docker/actions-runner-results-proxy.patch",
   "docker/start-runner.sh",
+  "docker/start-runner-root.sh",
   "docker/invalid-runner-hook.sh",
   "docker/job-started-hook.sh",
   "docker/report-container-usage.sh",
