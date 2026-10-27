@@ -190,7 +190,8 @@ function runnerImageRegistryManifestUrl(repository: string): string {
 export class RunnerImageBuilder extends Container<WorkerEnvironment> {
   enableInternet = true;
   interceptHttps = true;
-  // Detached image builds can legitimately run for 29 minutes. Durable Object
+  // Detached image builds can legitimately run for over an hour (compiling
+  // actions/runner from source exceeds the upstream 29-minute round budget). Durable Object
   // RPC calls do not renew the Containers SDK activity timer, so the default
   // 10-minute timeout would send SIGTERM to an otherwise healthy Kaniko build.
   sleepAfter = "2h";

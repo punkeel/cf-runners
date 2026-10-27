@@ -62,7 +62,7 @@ const publicRunnerImageOperationalErrors = new Set([
   "Cloudflare image builder bootstrap lost its deployment-scoped claim",
   "Cloudflare did not finish the builder deployment rollout before private bootstrap",
   "Cloudflare did not finish the shared private builder bootstrap",
-  "Cloudflare runner image build did not complete within 29 minutes",
+  "Cloudflare runner image build did not complete within 70 minutes",
   "Cloudflare runner image build queue did not drain after three source builds",
 ]);
 
