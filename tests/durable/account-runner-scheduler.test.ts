@@ -50,20 +50,8 @@ async function provisionRunner(
   await runInDurableObject(scheduler, async (_instance, state) => {
     // Admission capacity is separately covered by scheduler-policy tests. This
     // test prepares two live, compatible JIT runners to reproduce GitHub's
-    // out-of-order assignment race without calling the Containers API. Mark
-    // the pending capacity operation as already applied so the Durable Object
-    // alarm cannot race this test and issue a real capacity request.
-    state.storage.sql.exec(
-      `UPDATE scheduler_slots
-       SET applied_max_instances = desired_max_instances,
-           capacity_debounce_until = 0,
-           capacity_update_in_progress = 0
-       WHERE slot_id = 'preset:standard-3'`,
-    );
-    state.storage.sql.exec(
-      "UPDATE scheduler_jobs SET status = 'provisioning', slot_id = 'preset:standard-3' WHERE job_id = ?",
-      jobId,
-    );
+    // out-of-order assignment race without calling the Containers API.
+    state.storage.sql.exec("UPDATE scheduler_jobs SET status = 'provisioning' WHERE job_id = ?", jobId);
   });
   await scheduler.runnerProvisioned(jobId, runnerName, runnerId);
   await scheduler.runnerStarted(runnerName);
@@ -76,17 +64,7 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
 
     await scheduler.submit(queuedJob);
     await runInDurableObject(scheduler, async (_instance, state) => {
-      state.storage.sql.exec(
-        `UPDATE scheduler_jobs SET status = 'provisioning', slot_id = 'preset:standard-3' WHERE job_id = ?`,
-        queuedJob.jobId,
-      );
-      state.storage.sql.exec(
-        `UPDATE scheduler_slots
-         SET applied_max_instances = desired_max_instances,
-             capacity_update_in_progress = 0,
-             capacity_reclaim_pending = 0
-         WHERE slot_id = 'preset:standard-3'`,
-      );
+      state.storage.sql.exec(`UPDATE scheduler_jobs SET status = 'provisioning' WHERE job_id = ?`, queuedJob.jobId);
     });
 
     await expect(scheduler.claimProvisioning(queuedJob.jobId)).resolves.toMatchObject({
@@ -279,8 +257,8 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
       profile,
     });
     // The fresh attempt claims provisioning again under the `-r1` runner
-    // name (claimProvisioning may return `wait` while slot capacity is being
-    // applied, so drive the state directly).
+    // name (the test environment cannot run a real provisioning workflow,
+    // so drive the state directly).
     await runInDurableObject(scheduler, async (_instance, state) => {
       state.storage.sql.exec(
         `UPDATE scheduler_jobs SET status = 'provisioning', updated_at = ? WHERE job_id = ?`,
@@ -644,9 +622,6 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     const scheduler = env.RUNNER_SCHEDULER.getByName(`compatible-failure-${protocol}`);
     const source = job("1700", "cf-standard-3-job-1700", "refs/pull/1700/merge");
     await scheduler.submit(source);
-    await runInDurableObject(scheduler, async (_instance, state) => {
-      state.storage.sql.exec("UPDATE scheduler_slots SET applied_max_instances = desired_max_instances");
-    });
     const claim = await (protocol === "scoped"
       ? scheduler.claimProvisioning(source.jobId, source.runnerName)
       : scheduler.claimProvisioning(source.jobId));
@@ -658,7 +633,6 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     }
     const status = await scheduler.status();
     expect(status.jobs.find((entry) => entry.jobId === source.jobId)?.status).toBe("failed");
-    expect(status.slots.find((entry) => entry.slotId === "preset:standard-3")?.reservedCount).toBe(0);
   });
 
   it("accepts an old two-argument failure for an already provisioning legacy retry", async () => {
@@ -677,7 +651,6 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     await scheduler.provisioningFailed(source.jobId, "legacy retry failed");
     const status = await scheduler.status();
     expect(status.jobs.find((entry) => entry.jobId === source.jobId)?.status).toBe("failed");
-    expect(status.slots.find((entry) => entry.slotId === "preset:standard-3")?.reservedCount).toBe(0);
   });
 
   it("does not let an unscoped old workflow fail a replacement owned by a new workflow", async () => {
@@ -686,7 +659,6 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     const replacementName = `${source.runnerName}-r2`;
     await scheduler.submit(source);
     await runInDurableObject(scheduler, async (_instance, state) => {
-      state.storage.sql.exec("UPDATE scheduler_slots SET applied_max_instances = desired_max_instances");
       state.storage.sql.exec(
         "UPDATE scheduler_jobs SET runner_name = ?, runner_attempt = 2 WHERE job_id = ?",
         replacementName,

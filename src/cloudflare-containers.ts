@@ -1,11 +1,8 @@
 import { z } from "zod";
 
-import type { RunnerResources } from "./runner-profiles";
-
 export interface ContainersApiEnvironment {
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_CONTAINERS_API_TOKEN: string;
-  CUSTOM_RUNNER_APPLICATION: string;
   RUNNER_APPLICATION_PREFIX?: string;
   RUNNER_IMAGE_BUILDER_APPLICATION?: string;
 }
@@ -54,26 +51,13 @@ export type ContainerApplication = z.infer<typeof containerApplicationSchema>;
 type ContainerRollout = z.infer<typeof containerRolloutSchema>;
 type ContainersApiResult = z.infer<typeof containersApiResultSchema>;
 
+/**
+ * The result of a daemonless builder image transition: either the target is
+ * already live, or Cloudflare is applying it through the returned rollout.
+ */
 export type PrepareRunnerApplicationResult =
   | { kind: "ready"; applicationId: string }
   | { kind: "rollout"; applicationId: string; rolloutId: string };
-
-export type ConfigureCustomMachineResult = PrepareRunnerApplicationResult;
-
-export interface PrepareRunnerApplicationOptions {
-  /**
-   * A reconfigured idle custom slot must adopt the scheduler's exact ceiling.
-   * Ordinary capacity updates remain grow-only to avoid undoing a newer job's
-   * reservation.
-   */
-  exactMaxInstances?: boolean;
-}
-
-export interface UpdateCustomMachineMaxInstancesResult {
-  applicationId: string;
-  previousMaxInstances: number;
-  maxInstances: number;
-}
 
 export interface ContainerRegistryPushCredentials {
   username: string;
@@ -198,15 +182,6 @@ export async function createContainerRegistryPushCredentials(
   return credentials.data;
 }
 
-function targetConfiguration(application: ContainerApplication, resources: RunnerResources): ContainerConfiguration {
-  return {
-    image: application.configuration.image,
-    vcpu: resources.vcpu,
-    memory_mib: resources.memoryMib,
-    disk: { size_mb: resources.diskMb },
-  };
-}
-
 /**
  * The Containers GET response may include read-only configuration metadata.
  * Send only fields accepted by the PATCH and rollout APIs.
@@ -218,14 +193,6 @@ function writableConfiguration(configuration: ContainerConfiguration): Container
     memory_mib: configuration.memory_mib,
     disk: { size_mb: configuration.disk.size_mb },
   };
-}
-
-export function configurationMatches(configuration: ContainerConfiguration, resources: RunnerResources): boolean {
-  return (
-    configuration.vcpu === resources.vcpu &&
-    configuration.memory_mib === resources.memoryMib &&
-    configuration.disk.size_mb === resources.diskMb
-  );
 }
 
 export async function findRunnerApplication(
@@ -271,33 +238,10 @@ async function listRollouts(
   return rollouts.data;
 }
 
-async function patchApplication(
-  env: ContainersApiEnvironment,
-  application: ContainerApplication,
-  configuration: ContainerConfiguration,
-  maxInstances: number,
-  dependencies: ContainersApiDependencies,
-): Promise<void> {
-  await containersApiRequest(
-    env,
-    `/applications/${encodeURIComponent(application.id)}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({
-        configuration: writableConfiguration(configuration),
-        max_instances: maxInstances,
-        scheduling_policy: application.scheduling_policy,
-        rollout_active_grace_period: application.rollout_active_grace_period,
-      }),
-    },
-    dependencies,
-  );
-}
-
 /**
- * Image rollouts must not overwrite a concurrent scheduler capacity update.
- * The Container API accepts a partial PATCH, so send only the configuration
- * field and retain the application's current capacity ceiling server-side.
+ * The Container API accepts a partial PATCH, so an image update can send
+ * only the configuration field and leave every other application setting
+ * untouched server-side.
  */
 async function patchApplicationImage(
   env: ContainersApiEnvironment,
@@ -443,8 +387,7 @@ export async function runnerImageBuilderApplicationHasLiveInstances(
 
 /**
  * Starts an image rollout only for an idle runner application. Busy runners
- * keep their current image until the next source-image build request, while
- * the scheduler's max_instances reservation remains untouched.
+ * keep their current image until the next source-image build request.
  */
 export async function rolloutRunnerApplicationImages(
   env: ContainersApiEnvironment,
@@ -473,9 +416,10 @@ export async function rolloutRunnerApplicationImages(
 
   for (const [index, listedApplication] of applications.entries()) {
     try {
-      // The scheduler can resize an idle custom application while an image build
-      // is finishing. Re-read its configuration immediately before patching so
-      // an image rollout never writes the stale resources from the initial list.
+      // Another actor can change a runner application's configuration while
+      // an image build is finishing. Re-read it immediately before patching
+      // so an image rollout never writes the stale values from the initial
+      // list.
       // eslint-disable-next-line no-await-in-loop -- obtain the current configuration for this exact application.
       const application = await findRunnerApplication(env, listedApplication.name, dependencies);
       // eslint-disable-next-line no-await-in-loop -- a configuration rollout must be observed before the next application.
@@ -496,12 +440,12 @@ export async function rolloutRunnerApplicationImages(
         continue;
       }
       if (application.configuration.image !== image) {
-        // eslint-disable-next-line no-await-in-loop -- preserve capacity by finishing one image patch before the next.
+        // eslint-disable-next-line no-await-in-loop -- serialize the image PATCH before the next application.
         await patchApplicationImage(env, application, image, dependencies);
       }
-      // A scheduler admission may have resized this custom application while
-      // the image-only PATCH was in flight. Read its current resources again so
-      // the full rollout target cannot restore that stale machine shape.
+      // The configuration may have changed while the image-only PATCH was in
+      // flight. Read it again so the full rollout target cannot restore a
+      // stale configuration.
       // eslint-disable-next-line no-await-in-loop -- this exact application owns its next rollout body.
       const current = await findRunnerApplication(env, application.name, dependencies);
       if (applicationHasLiveInstances(current)) {
@@ -511,8 +455,8 @@ export async function rolloutRunnerApplicationImages(
       // PATCH acceptance does not make the requested image visible in the
       // application's active configuration until a rollout applies it. Build
       // the rollout target from this freshly read configuration so concurrent
-      // scheduler-owned resource changes survive while the new image remains
-      // explicit below.
+      // configuration changes survive while the new image remains explicit
+      // below.
       // If a prior PATCH made it through but its rollout call did not, the
       // application already has this image here. Still create the rollout: a
       // desired configuration alone does not prove live instances moved.
@@ -587,134 +531,6 @@ export async function rolloutRunnerImageBuilderApplication(
   return { kind: "rollout", applicationId: application.id, rolloutId: rollout.id };
 }
 
-/**
- * Ensures a named runner application has enough capacity for already-admitted
- * jobs. Ordinary calls never lower a ceiling, so concurrent admissions cannot
- * accidentally undo a newer one-slot increase. A scheduler-controlled custom
- * reconfiguration may explicitly select an exact replacement ceiling.
- */
-export async function prepareRunnerApplication(
-  env: ContainersApiEnvironment,
-  applicationName: string,
-  desiredResources: RunnerResources | undefined,
-  minimumMaxInstances: number,
-  dependencies: ContainersApiDependencies = defaultDependencies,
-  options: PrepareRunnerApplicationOptions = {},
-): Promise<PrepareRunnerApplicationResult> {
-  if (!Number.isSafeInteger(minimumMaxInstances) || minimumMaxInstances < 1) {
-    throw new CloudflareContainersApiError("max_instances must be a positive integer", 400);
-  }
-
-  const application = await findRunnerApplication(env, applicationName, dependencies);
-  if (desiredResources === undefined) {
-    const targetMaxInstances = Math.max(application.max_instances, minimumMaxInstances);
-    if (targetMaxInstances !== application.max_instances) {
-      await patchApplication(env, application, application.configuration, targetMaxInstances, dependencies);
-    }
-    return { kind: "ready", applicationId: application.id };
-  }
-
-  const desiredConfiguration = targetConfiguration(application, desiredResources);
-  const reconfiguring = !configurationMatches(application.configuration, desiredResources);
-  const rollouts = await listRollouts(env, application.id, dependencies);
-  const matchingActiveRollout = rollouts.find(
-    (rollout) =>
-      (rollout.status === "pending" || rollout.status === "progressing") &&
-      configurationMatches(rollout.target_configuration, desiredResources),
-  );
-  if (matchingActiveRollout !== undefined) {
-    return { kind: "rollout", applicationId: application.id, rolloutId: matchingActiveRollout.id };
-  }
-
-  const hasActiveRollout = rollouts.some((rollout) => rollout.status === "pending" || rollout.status === "progressing");
-  if (hasActiveRollout) {
-    throw new CloudflareContainersApiError(
-      "Another Container configuration is still rolling out; retry after it completes",
-      409,
-    );
-  }
-
-  const targetMaxInstances = options.exactMaxInstances
-    ? minimumMaxInstances
-    : Math.max(application.max_instances, minimumMaxInstances);
-  if (!reconfiguring && targetMaxInstances === application.max_instances) {
-    return { kind: "ready", applicationId: application.id };
-  }
-
-  await patchApplication(env, application, desiredConfiguration, targetMaxInstances, dependencies);
-  if (!reconfiguring) {
-    return { kind: "ready", applicationId: application.id };
-  }
-  const rolloutResult = await containersApiRequest(
-    env,
-    `/applications/${encodeURIComponent(application.id)}/rollouts`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        description: `GitHub Actions runner: ${desiredResources.vcpu} vCPU, ${desiredResources.memoryMib} MiB, ${desiredResources.diskMb} MB`,
-        strategy: "rolling",
-        target_configuration: desiredConfiguration,
-        step_percentage: 100,
-        kind: "full_auto",
-      }),
-    },
-    dependencies,
-  );
-  const rollout = containerRolloutSchema.safeParse(rolloutResult);
-  if (!rollout.success) {
-    throw new CloudflareContainersApiError("Cloudflare returned an invalid Container rollout", 502);
-  }
-  return { kind: "rollout", applicationId: application.id, rolloutId: rollout.data.id };
-}
-
-/**
- * Applies a scheduler-planned reclamation from an inactive application. A
- * later admission may raise the ceiling again, so an older reduction is
- * harmless and cannot over-admit.
- */
-export async function reconcileRunnerApplicationCapacity(
-  env: ContainersApiEnvironment,
-  applicationName: string,
-  targetMaxInstances: number,
-  dependencies: ContainersApiDependencies = defaultDependencies,
-): Promise<UpdateCustomMachineMaxInstancesResult> {
-  if (!Number.isSafeInteger(targetMaxInstances) || targetMaxInstances < 1) {
-    throw new CloudflareContainersApiError("max_instances must be a positive integer", 400);
-  }
-  const application = await findRunnerApplication(env, applicationName, dependencies);
-  if (application.max_instances > targetMaxInstances) {
-    await patchApplication(env, application, application.configuration, targetMaxInstances, dependencies);
-  }
-  return {
-    applicationId: application.id,
-    previousMaxInstances: application.max_instances,
-    maxInstances: Math.min(application.max_instances, targetMaxInstances),
-  };
-}
-
-export async function configureCustomMachine(
-  env: ContainersApiEnvironment,
-  resources: RunnerResources,
-  dependencies: ContainersApiDependencies = defaultDependencies,
-): Promise<ConfigureCustomMachineResult> {
-  return prepareRunnerApplication(env, env.CUSTOM_RUNNER_APPLICATION, resources, 1, dependencies);
-}
-
-export async function updateCustomMachineMaxInstances(
-  env: ContainersApiEnvironment,
-  maxInstances: number,
-  dependencies: ContainersApiDependencies = defaultDependencies,
-): Promise<UpdateCustomMachineMaxInstancesResult> {
-  const application = await findRunnerApplication(env, env.CUSTOM_RUNNER_APPLICATION, dependencies);
-  if (!Number.isSafeInteger(maxInstances) || maxInstances < 1) {
-    throw new CloudflareContainersApiError("max_instances must be a positive integer", 400);
-  }
-  if (application.max_instances !== maxInstances) {
-    await patchApplication(env, application, application.configuration, maxInstances, dependencies);
-  }
-  return { applicationId: application.id, previousMaxInstances: application.max_instances, maxInstances };
-}
-
 export async function getContainerRolloutStatus(
   env: ContainersApiEnvironment,
   applicationId: string,
@@ -733,5 +549,3 @@ export async function getContainerRolloutStatus(
   }
   return rollout.data.status;
 }
-
-export const getCustomMachineRolloutStatus = getContainerRolloutStatus;

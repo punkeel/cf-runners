@@ -12,7 +12,6 @@ import {
   defaultRunnerCacheMaxBytes,
   ownershipManifestResourceCollisions,
   parseJsonc,
-  preserveCustomApplicationConfiguration,
   preserveRunnerApplicationImages,
   r2BucketIsPublic,
   r2LifecycleRuleExists,
@@ -31,27 +30,15 @@ import {
   wranglerAuthenticationToken,
 } from "../scripts/deploy.ts";
 
-const customApplication = "cloudflare-github-actions-runner-custom";
-
-function configuration() {
-  return {
-    image: "registry.cloudflare.com/account/runner@sha256:abc",
-    vcpu: 4,
-    memory_mib: 12_288,
-    disk: { size_mb: 4_000 },
-  };
-}
+const builderApplication = "cloudflare-github-actions-runner-image-builder";
+const runnerApplication = "cloudflare-github-actions-runner-githubactionsrunner";
 
 function config() {
   return {
-    vars: { CUSTOM_RUNNER_APPLICATION: customApplication },
+    vars: { RUNNER_IMAGE_BUILDER_APPLICATION: builderApplication },
     containers: [
-      {
-        name: customApplication,
-        image: "registry.cloudflare.com/account/runner@sha256:abc",
-        instance_type: { vcpu: 1, memory_mib: 3_072, disk_mb: 6_000 },
-        max_instances: 1,
-      },
+      { name: builderApplication, image: "docker.io/library/ubuntu:24.04", max_instances: 1 },
+      { name: runnerApplication, image: "docker.io/library/ubuntu:24.04", max_instances: 16 },
     ],
   };
 }
@@ -345,110 +332,54 @@ creation_date:  2026-08-13T00:00:00.000Z`),
     expect(transientWranglerAuthenticationError(error)).toBe(false);
   });
 
-  it("uses the live custom shape and ceiling during deployment", () => {
-    const deploymentConfig = config();
-    preserveCustomApplicationConfiguration(
-      deploymentConfig,
-      new Map([
-        [
-          customApplication,
-          {
-            configuration: configuration(),
-            max_instances: 2,
-            health: { instances: { active: 0, assigned: 0, starting: 0, scheduling: 0 } },
-          },
-        ],
-      ]),
-    );
-
-    expect(deploymentConfig.containers[0]).toMatchObject({
-      instance_type: { vcpu: 4, memory_mib: 12_288, disk_mb: 4_000 },
-      max_instances: 2,
-    });
-  });
-
-  it("preserves an idle preset ceiling during an ordinary source deployment", () => {
+  it("resets an idle builder image while preserving remote runner images", () => {
     const deploymentConfig = {
-      vars: { CUSTOM_RUNNER_APPLICATION: customApplication },
-      containers: [{ name: "runner-standard-3", instance_type: "standard-3", max_instances: 1 }],
-    };
-    preserveCustomApplicationConfiguration(
-      deploymentConfig,
-      new Map([
-        [
-          "runner-standard-3",
-          {
-            max_instances: 5,
-            health: { instances: { active: 0, assigned: 0, starting: 0, scheduling: 0 } },
-          },
-        ],
-      ]),
-    );
-
-    expect(deploymentConfig.containers[0]).toMatchObject({ max_instances: 5 });
-  });
-
-  it("updates the pinned builder image while preserving remote runner images", () => {
-    const deploymentConfig = {
-      vars: { RUNNER_IMAGE_BUILDER_APPLICATION: "runner-image-builder" },
+      vars: { RUNNER_IMAGE_BUILDER_APPLICATION: builderApplication },
       containers: [
-        { name: "runner-image-builder", image: "docker.io/library/docker@sha256:new" },
-        { name: "runner-standard-3", image: "docker.io/library/ubuntu:24.04" },
+        { name: builderApplication, image: "docker.io/library/docker@sha256:new" },
+        { name: runnerApplication, image: "docker.io/library/ubuntu:24.04" },
       ],
     };
     preserveRunnerApplicationImages(
       deploymentConfig,
       new Map([
-        ["runner-image-builder", { configuration: { image: "docker.io/library/docker@sha256:old" } }],
-        ["runner-standard-3", { configuration: { image: "registry.cloudflare.com/account/runner:immutable" } }],
+        [builderApplication, { configuration: { image: "docker.io/library/docker@sha256:old" } }],
+        [runnerApplication, { configuration: { image: "registry.cloudflare.com/account/runner:immutable" } }],
       ]),
     );
 
     expect(deploymentConfig.containers).toEqual([
-      { name: "runner-image-builder", image: "docker.io/library/docker@sha256:new" },
-      { name: "runner-standard-3", image: "registry.cloudflare.com/account/runner:immutable" },
+      { name: builderApplication, image: "docker.io/library/docker@sha256:new" },
+      { name: runnerApplication, image: "registry.cloudflare.com/account/runner:immutable" },
     ]);
   });
 
-  it("keeps a live custom application's current image while other applications can deploy", () => {
+  it("keeps both a busy application's current image so a deployment cannot roll it", () => {
     const deploymentConfig = config();
-    deploymentConfig.containers[0].image = "registry.cloudflare.com/account/runner:new";
-    preserveCustomApplicationConfiguration(
+    const liveImage = (image: string, instances: { active?: number; starting?: number }) => ({
+      configuration: { image },
+      health: { instances },
+    });
+    const liveBuilder = liveImage("registry.cloudflare.com/account/builder:daemonless", { active: 1 });
+    const liveRunner = liveImage("registry.cloudflare.com/account/runner@sha256:abc", { starting: 1 });
+    preserveRunnerApplicationImages(
       deploymentConfig,
       new Map([
-        [
-          customApplication,
-          {
-            configuration: configuration(),
-            max_instances: 2,
-            health: { instances: { active: 1 } },
-          },
-        ],
+        [builderApplication, liveBuilder],
+        [runnerApplication, liveRunner],
       ]),
     );
+
     expect(deploymentConfig.containers[0]).toMatchObject({
+      name: builderApplication,
+      image: "registry.cloudflare.com/account/builder:daemonless",
+    });
+    expect(deploymentConfig.containers[1]).toMatchObject({
+      name: runnerApplication,
       image: "registry.cloudflare.com/account/runner@sha256:abc",
-      instance_type: { vcpu: 4, memory_mib: 12_288, disk_mb: 4_000 },
-      max_instances: 2,
     });
     expect(activeInstanceCount({ health: { instances: { active: 1, assigned: 2 } } })).toBe(3);
-  });
-
-  it("preserves a live custom application's existing configuration when its image is unchanged", () => {
-    expect(() =>
-      preserveCustomApplicationConfiguration(
-        config(),
-        new Map([
-          [
-            customApplication,
-            {
-              configuration: configuration(),
-              max_instances: 2,
-              health: { instances: { starting: 1 } },
-            },
-          ],
-        ]),
-      ),
-    ).not.toThrow();
+    expect(activeInstanceCount({ health: { instances: { stopped: 5 } } })).toBe(0);
+    expect(activeInstanceCount(undefined)).toBe(0);
   });
 });

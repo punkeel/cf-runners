@@ -27,7 +27,6 @@ const wranglerTransientAuthenticationAttempts = 4;
 const wranglerTransientAuthenticationRetryDelayMs = 1_000;
 
 const nonEmptyStringSchema = z.string().trim().min(1);
-const positiveIntegerSchema = z.number().int().positive();
 const workerBindingSchema = z.object({
   name: z.string(),
   text: z.string().optional().catch(undefined),
@@ -684,73 +683,27 @@ export function runnerImageBuilderBootstrapConfiguration(config, environment) {
 }
 
 /**
- * Runner applications are rolled to an immutable image by the remote builder.
- * Preserve those tags on normal Worker deployments, but never preserve the
- * builder application's pinned daemonless image.
+ * The two remaining Container applications — the one-shot daemonless image
+ * builder and the per-start-sized GitHub Actions runner — keep their live
+ * image while a deployment is in flight. The runner application is rolled to
+ * an immutable image by the remote builder, so its current tag is preserved
+ * on every normal Worker deployment. The idle builder instead restarts from
+ * the controlled public bootstrap image each deployment; a busy builder
+ * keeps the image it is currently running so the deployment cannot roll the
+ * image under an in-flight build.
  */
 export function preserveRunnerApplicationImages(config, applications) {
   const builderApplication = config.vars?.RUNNER_IMAGE_BUILDER_APPLICATION;
   for (const container of config.containers ?? []) {
-    if (container?.name === builderApplication) {
+    const current = applications.get(container?.name);
+    const currentImage = z.object({ configuration: z.object({ image: nonEmptyStringSchema }) }).safeParse(current);
+    if (!currentImage.success) {
       continue;
     }
-    const currentImage = z
-      .object({ configuration: z.object({ image: nonEmptyStringSchema }) })
-      .safeParse(applications.get(container?.name));
-    if (currentImage.success) {
-      container.image = currentImage.data.configuration.image;
-    }
-  }
-}
-
-export function preserveCustomApplicationConfiguration(config, applications) {
-  for (const container of config.containers ?? []) {
-    const containerName = z.string().safeParse(container?.name);
-    if (!containerName.success) {
+    if (container?.name === builderApplication && activeInstanceCount(current) === 0) {
       continue;
     }
-    const current = applications.get(containerName.data);
-    if (current === undefined) {
-      continue;
-    }
-    // Retained ceilings are the scheduler's account-capacity cache. Preserve
-    // them for every application; otherwise a source deployment would reset a
-    // recently warmed preset profile back to its bootstrap value of one.
-    const maxInstances = positiveIntegerSchema.safeParse(current.max_instances);
-    if (maxInstances.success) {
-      container.max_instances = maxInstances.data;
-    }
-    if (!containerName.data.startsWith(`${config.vars.CUSTOM_RUNNER_APPLICATION}`)) {
-      continue;
-    }
-    const parsedCurrent = z
-      .object({
-        max_instances: positiveIntegerSchema,
-        configuration: z.object({
-          vcpu: z.number(),
-          memory_mib: z.number(),
-          disk: z.object({ size_mb: z.number() }),
-          image: z.string(),
-        }),
-      })
-      .safeParse(current);
-    if (!parsedCurrent.success) {
-      throw new Error(`Cloudflare returned an invalid configuration for ${containerName.data}`);
-    }
-    const configuration = parsedCurrent.data.configuration;
-    if (activeInstanceCount(current) > 0 && container.image !== configuration.image) {
-      // A custom application can be busy while an unrelated preset needs an
-      // image update. Retain the live image for this one application so the
-      // deployment is safe and the rest of the runner pool can roll forward.
-      // The next deployment updates this custom application after it is idle.
-      container.image = configuration.image;
-    }
-    container.instance_type = {
-      vcpu: configuration.vcpu,
-      memory_mib: configuration.memory_mib,
-      disk_mb: configuration.disk.size_mb,
-    };
-    container.max_instances = parsedCurrent.data.max_instances;
+    container.image = currentImage.data.configuration.image;
   }
 }
 
@@ -784,7 +737,6 @@ async function generatedConfig(
     runnerImageBuilderBootstrapConfiguration(config, environment),
   ]);
   preserveRunnerApplicationImages(config, applications);
-  preserveCustomApplicationConfiguration(config, applications);
   // The generated file lives in the system temp directory, so preserve paths
   // that Wrangler would otherwise resolve relative to wrangler.jsonc.
   const mainPath = z.string().safeParse(config.main);
@@ -823,7 +775,11 @@ async function generatedConfig(
   if (builderContainer === undefined) {
     throw new Error("wrangler.jsonc must define the RUNNER_IMAGE_BUILDER_APPLICATION Container");
   }
-  builderContainer.image = builderBootstrap.image;
+  // preserveRunnerApplicationImages already pinned a busy builder's live
+  // image; only an idle builder restarts from the controlled public base.
+  if (activeInstanceCount(applications.get(builderContainer.name)) === 0) {
+    builderContainer.image = builderBootstrap.image;
+  }
   configureRunnerStorageBindings(config, cacheConfiguration);
   const directory = await mkdtemp(join(tmpdir(), "cloudflare-github-actions-runner-"));
   const path = join(directory, "wrangler.generated.json");

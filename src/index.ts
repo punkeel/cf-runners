@@ -1,4 +1,6 @@
-import { Container, ContainerProxy } from "@cloudflare/containers";
+import { ContainerProxy } from "@cloudflare/containers";
+
+import { InstanceSizedContainer } from "./instance-sized-container";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -164,7 +166,17 @@ function json<const Body>(body: Body, status = 200): Response {
   return Response.json(body, { status });
 }
 
-abstract class GitHubActionsRunnerContainer extends Container<WorkerEnvironment> {
+/**
+ * The one runner container class. The instance resources (vCPU/memory/disk)
+ * are chosen per queued job from its `runs-on` label, at `start()` time, via
+ * InstanceSizedContainer — one container application serves every preset
+ * and custom size. Diagnostic runners (`cf-validation-job-*`, used to fail
+ * jobs whose `runs-on` labels are invalid) use the same class with the
+ * `basic` instance size; the pre-job hook exits before workflow code runs,
+ * so they
+ * never idle long enough for `sleepAfter` to matter.
+ */
+export class GitHubActionsRunner extends InstanceSizedContainer<WorkerEnvironment> {
   sleepAfter = "1h";
   enableInternet = true;
 
@@ -200,33 +212,6 @@ abstract class GitHubActionsRunnerContainer extends Container<WorkerEnvironment>
     });
     throw cause;
   }
-}
-
-export class GitHubActionsRunnerLite extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerBasic extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerStandard1 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerStandard2 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunner extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerStandard4 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom2 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom3 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom4 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom5 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom6 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom7 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom8 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom9 extends GitHubActionsRunnerContainer {}
-export class GitHubActionsRunnerCustom10 extends GitHubActionsRunnerContainer {}
-
-/**
- * A small, isolated runner used only to turn an invalid `runs-on` request into
- * a failed GitHub Actions job. It deliberately does not participate in the
- * account scheduler: the pre-job hook exits before workflow code runs.
- */
-export class GitHubActionsRunnerValidation extends Container<WorkerEnvironment> {
-  sleepAfter = "5m";
-  enableInternet = true;
 }
 
 type InvalidRunnerDecision = Extract<WebhookDecision, { kind: "invalid-runner" }>;
@@ -273,7 +258,7 @@ export async function startInvalidRunner(
   const result = await provisionRunner(
     env,
     { ...target, token },
-    runnerContainerFor(env, "validation", decision.runnerName),
+    runnerContainerFor(env, decision.runnerName),
     decision.runnerName,
     RUNNER_PROFILES.basic,
     {

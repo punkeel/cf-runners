@@ -1,3 +1,4 @@
+import type { ContainerInstanceSpec } from "./instance-sized-container";
 import type { GitHubRepositoryTarget } from "./github-repository";
 import type { ResourceTraceContainerConfiguration } from "./resource-traces";
 import type { RunnerCacheContainerConfiguration } from "./runner-cache";
@@ -17,7 +18,8 @@ export interface RunnerState {
 
 export interface RunnerContainer {
   getState(): Promise<RunnerState>;
-  start(options: { envVars: Record<string, string> }): Promise<void>;
+  /** The instance shape is chosen per start; the app config fixes none. */
+  start(options: { envVars: Record<string, string>; instance: ContainerInstanceSpec }): Promise<void>;
 }
 
 interface RunnerEnvironmentVariables {
@@ -213,6 +215,7 @@ export async function provisionRunner(
     }
     await runner.start({
       envVars,
+      instance: { vcpu: profile.vcpu, memoryMib: profile.memoryMib, diskMb: profile.diskMb },
     });
   } catch (error) {
     console.error("Could not start the GitHub Actions runner container", {

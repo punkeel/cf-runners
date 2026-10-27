@@ -3,26 +3,23 @@ import { z } from "zod";
 
 import {
   CloudflareContainersApiError,
-  configureCustomMachine,
   createContainerRegistryPushCredentials,
-  getCustomMachineRolloutStatus,
-  prepareRunnerApplication,
-  reconcileRunnerApplicationCapacity,
+  getContainerRolloutStatus,
   rolloutRunnerApplicationImages,
   rolloutRunnerImageBuilderApplication,
   runnerImageBuilderApplicationHasLiveInstances,
   runnerImageBuilderApplicationRolloutsAreActive,
   type ContainersApiDependencies,
-  updateCustomMachineMaxInstances,
 } from "../src/cloudflare-containers";
 
 const env = {
   CLOUDFLARE_ACCOUNT_ID: "account-id",
   CLOUDFLARE_CONTAINERS_API_TOKEN: "cloudflare-token",
-  CUSTOM_RUNNER_APPLICATION: "runner-custom",
   RUNNER_APPLICATION_PREFIX: "runner",
   RUNNER_IMAGE_BUILDER_APPLICATION: "runner-image-builder",
 };
+
+const runnerApplicationName = "runner-githubactionsrunner";
 
 const resources = { vcpu: 2, memoryMib: 6_144, diskMb: 12_000 };
 
@@ -35,7 +32,7 @@ function configuration(values = resources) {
   };
 }
 
-function application(values = resources, name = env.CUSTOM_RUNNER_APPLICATION) {
+function application(values = resources, name = runnerApplicationName) {
   return {
     id: "application-id",
     name,
@@ -69,11 +66,12 @@ function dependencies(...responses: Response[]): ContainersApiDependencies & { f
   return { fetch: fetchMock };
 }
 
-describe("Cloudflare custom Container configuration", () => {
-  it("reads a full page of rollout history before deciding an image needs another rollout", async () => {
-    const deps = dependencies(response([application()]), response([]));
+describe("Cloudflare Container configuration", () => {
+  it("reads a full page of rollout history before deciding the builder image needs another rollout", async () => {
+    const builder = application(resources, "runner-image-builder");
+    const deps = dependencies(response([builder]), response([]), response(builder), response(rollout("completed")));
 
-    await configureCustomMachine(env, resources, deps);
+    await rolloutRunnerImageBuilderApplication(env, "registry.cloudflare.com/account/builder:new", deps);
 
     expect(String(deps.fetch.mock.calls[1]?.[0])).toContain("/rollouts?limit=100");
   });
@@ -122,182 +120,9 @@ describe("Cloudflare custom Container configuration", () => {
     await expect(runnerImageBuilderApplicationHasLiveInstances(env, stopped)).resolves.toBe(false);
   });
 
-  it("uses an application whose current machine configuration already matches", async () => {
-    const deps = dependencies(response([application()]), response([]));
-
-    await expect(configureCustomMachine(env, resources, deps)).resolves.toEqual({
-      kind: "ready",
-      applicationId: "application-id",
-    });
-    expect(deps.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it("reuses an active rollout that targets the requested machine", async () => {
-    const deps = dependencies(
-      response([application({ vcpu: 1, memoryMib: 3_072, diskMb: 6_000 })]),
-      response([rollout()]),
-    );
-
-    await expect(configureCustomMachine(env, resources, deps)).resolves.toEqual({
-      kind: "rollout",
-      applicationId: "application-id",
-      rolloutId: "rollout-id",
-    });
-    expect(deps.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it("waits before replacing an active rollout for a different machine", async () => {
-    const otherResources = { vcpu: 1, memoryMib: 3_072, diskMb: 6_000 };
-    const deps = dependencies(
-      response([application(otherResources)]),
-      response([rollout("progressing", otherResources)]),
-    );
-
-    await expect(configureCustomMachine(env, resources, deps)).rejects.toEqual(
-      expect.objectContaining<Partial<CloudflareContainersApiError>>({
-        status: 409,
-        message: "Another Container configuration is still rolling out; retry after it completes",
-      }),
-    );
-    expect(deps.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it("updates the application and creates a rollout for a new machine", async () => {
-    const initialResources = { vcpu: 1, memoryMib: 3_072, diskMb: 6_000 };
-    const deps = dependencies(
-      response([application(initialResources)]),
-      response([]),
-      response(application(resources)),
-      response(rollout()),
-    );
-
-    await expect(configureCustomMachine(env, resources, deps)).resolves.toEqual({
-      kind: "rollout",
-      applicationId: "application-id",
-      rolloutId: "rollout-id",
-    });
-
-    const patchRequest = deps.fetch.mock.calls[2];
-    expect(patchRequest?.[0]).toBe(
-      "https://api.cloudflare.com/client/v4/accounts/account-id/containers/applications/application-id",
-    );
-    expect(patchRequest?.[1]).toMatchObject({ method: "PATCH" });
-    expect(JSON.parse(String(patchRequest?.[1]?.body))).toEqual({
-      configuration: configuration(),
-      max_instances: 1,
-      scheduling_policy: "regional",
-      rollout_active_grace_period: 300,
-    });
-
-    const rolloutRequest = deps.fetch.mock.calls[3];
-    expect(rolloutRequest?.[0]).toBe(
-      "https://api.cloudflare.com/client/v4/accounts/account-id/containers/applications/application-id/rollouts",
-    );
-    expect(rolloutRequest?.[1]).toMatchObject({ method: "POST" });
-    expect(JSON.parse(String(rolloutRequest?.[1]?.body))).toMatchObject({
-      strategy: "rolling",
-      target_configuration: configuration(),
-      step_percentage: 100,
-      kind: "full_auto",
-    });
-  });
-
-  it("updates only the custom application's maximum instance count", async () => {
-    const deps = dependencies(response([application()]), response(application()));
-
-    await expect(updateCustomMachineMaxInstances(env, 2, deps)).resolves.toEqual({
-      applicationId: "application-id",
-      previousMaxInstances: 1,
-      maxInstances: 2,
-    });
-
-    const patchRequest = deps.fetch.mock.calls[1];
-    expect(patchRequest?.[0]).toBe(
-      "https://api.cloudflare.com/client/v4/accounts/account-id/containers/applications/application-id",
-    );
-    expect(patchRequest?.[1]).toMatchObject({ method: "PATCH" });
-    expect(JSON.parse(String(patchRequest?.[1]?.body))).toEqual({
-      configuration: configuration(),
-      max_instances: 2,
-      scheduling_policy: "regional",
-      rollout_active_grace_period: 300,
-    });
-  });
-
-  it("raises a named runner application's ceiling without a configuration rollout", async () => {
-    const applicationName = "runner-standard-3";
-    const deps = dependencies(
-      response([application(resources, applicationName)]),
-      response(application(resources, applicationName)),
-    );
-
-    await expect(prepareRunnerApplication(env, applicationName, undefined, 2, deps)).resolves.toEqual({
-      kind: "ready",
-      applicationId: "application-id",
-    });
-
-    const patchRequest = deps.fetch.mock.calls[1];
-    expect(patchRequest?.[1]).toMatchObject({ method: "PATCH" });
-    expect(JSON.parse(String(patchRequest?.[1]?.body))).toMatchObject({
-      max_instances: 2,
-      configuration: configuration(),
-    });
-  });
-
-  it("does not echo read-only configuration metadata into a capacity update", async () => {
-    const applicationName = "runner-standard-3";
-    const applicationWithReadOnlyMetadata = {
-      ...application(resources, applicationName),
-      configuration: { ...configuration(), location: "sjc", deployment_type: "regional" },
-    };
-    const deps = dependencies(response([applicationWithReadOnlyMetadata]), response(applicationWithReadOnlyMetadata));
-
-    await prepareRunnerApplication(env, applicationName, undefined, 2, deps);
-
-    const request = z
-      .object({
-        configuration: z.object({
-          image: z.string(),
-          vcpu: z.number(),
-          memory_mib: z.number(),
-          disk: z.object({ size_mb: z.number() }),
-        }),
-      })
-      .parse(JSON.parse(String(deps.fetch.mock.calls[1]?.[1]?.body)));
-    expect(request.configuration).not.toHaveProperty("location");
-    expect(request.configuration).not.toHaveProperty("deployment_type");
-    expect(request.configuration).toEqual(configuration());
-  });
-
-  it("uses the scheduler's exact ceiling while reconfiguring an idle custom slot", async () => {
-    const applicationName = "runner-custom";
-    const retainedApplication = { ...application(resources, applicationName), max_instances: 10 };
-    const deps = dependencies(response([retainedApplication]), response([]), response(retainedApplication));
-
-    await expect(
-      prepareRunnerApplication(env, applicationName, resources, 1, deps, { exactMaxInstances: true }),
-    ).resolves.toEqual({ kind: "ready", applicationId: "application-id" });
-
-    expect(JSON.parse(String(deps.fetch.mock.calls[2]?.[1]?.body))).toMatchObject({ max_instances: 1 });
-  });
-
-  it("reduces a named runner application's ceiling after capacity is released", async () => {
-    const applicationName = "runner-standard-3";
-    const activeApplication = { ...application(resources, applicationName), max_instances: 2 };
-    const deps = dependencies(response([activeApplication]), response(activeApplication));
-
-    await expect(reconcileRunnerApplicationCapacity(env, applicationName, 1, deps)).resolves.toEqual({
-      applicationId: "application-id",
-      previousMaxInstances: 2,
-      maxInstances: 1,
-    });
-
-    expect(JSON.parse(String(deps.fetch.mock.calls[1]?.[1]?.body))).toMatchObject({ max_instances: 1 });
-  });
-
   it("returns rollout status and reports Cloudflare API failures", async () => {
     const statusDependencies = dependencies(response(rollout("completed")));
-    await expect(getCustomMachineRolloutStatus(env, "application-id", "rollout-id", statusDependencies)).resolves.toBe(
+    await expect(getContainerRolloutStatus(env, "application-id", "rollout-id", statusDependencies)).resolves.toBe(
       "completed",
     );
 
@@ -307,7 +132,9 @@ describe("Cloudflare custom Container configuration", () => {
         { status: 403 },
       ),
     );
-    await expect(configureCustomMachine(env, resources, failureDependencies)).rejects.toEqual(
+    await expect(
+      rolloutRunnerImageBuilderApplication(env, "registry.cloudflare.com/account/builder:new", failureDependencies),
+    ).rejects.toEqual(
       expect.objectContaining<Partial<CloudflareContainersApiError>>({
         name: "CloudflareContainersApiError",
         status: 403,
@@ -333,10 +160,10 @@ describe("Cloudflare custom Container configuration", () => {
     });
   });
 
-  it("rolls an idle runner image without changing the scheduler-owned capacity ceiling", async () => {
+  it("rolls an idle runner image with a configuration-only PATCH", async () => {
     const idle = {
-      ...application(resources, "runner-standard-3"),
-      max_instances: 7,
+      ...application(resources, runnerApplicationName),
+      max_instances: 16,
       health: { instances: { active: 0, assigned: 0, starting: 0, scheduling: 0 } },
     };
     const deps = dependencies(
@@ -356,7 +183,7 @@ describe("Cloudflare custom Container configuration", () => {
     await expect(
       rolloutRunnerApplicationImages(env, "registry.cloudflare.com/account/runner:new", deps, { onProgress: progress }),
     ).resolves.toEqual({
-      updatedApplications: ["runner-standard-3"],
+      updatedApplications: [runnerApplicationName],
       skippedApplications: [],
     });
     expect(JSON.parse(String(deps.fetch.mock.calls[3]?.[1]?.body))).toEqual({
@@ -374,9 +201,49 @@ describe("Cloudflare custom Container configuration", () => {
     expect(progress).toHaveBeenNthCalledWith(2, { processedApplications: 1, totalApplications: 1 });
   });
 
+  it("does not echo read-only configuration metadata into an image update", async () => {
+    const applicationWithReadOnlyMetadata = {
+      ...application(resources, runnerApplicationName),
+      configuration: { ...configuration(), location: "sjc", deployment_type: "regional" },
+      health: { instances: { active: 0 } },
+    };
+    const deps = dependencies(
+      response([applicationWithReadOnlyMetadata]),
+      response([applicationWithReadOnlyMetadata]),
+      response([]),
+      response(applicationWithReadOnlyMetadata),
+      response([
+        {
+          ...applicationWithReadOnlyMetadata,
+          configuration: {
+            ...applicationWithReadOnlyMetadata.configuration,
+            image: "registry.cloudflare.com/account/runner:new",
+          },
+        },
+      ]),
+      response(rollout("completed", resources)),
+    );
+
+    await rolloutRunnerApplicationImages(env, "registry.cloudflare.com/account/runner:new", deps);
+
+    const request = z
+      .object({
+        configuration: z.object({
+          image: z.string(),
+          vcpu: z.number(),
+          memory_mib: z.number(),
+          disk: z.object({ size_mb: z.number() }),
+        }),
+      })
+      .parse(JSON.parse(String(deps.fetch.mock.calls[3]?.[1]?.body)));
+    expect(request.configuration).not.toHaveProperty("location");
+    expect(request.configuration).not.toHaveProperty("deployment_type");
+    expect(request.configuration).toEqual({ ...configuration(), image: "registry.cloudflare.com/account/runner:new" });
+  });
+
   it("does not fail an image rollout when setup progress reporting is unavailable", async () => {
     const idle = {
-      ...application(resources, "runner-standard-3"),
+      ...application(resources, runnerApplicationName),
       health: { instances: { active: 0, assigned: 0, starting: 0, scheduling: 0 } },
     };
     const deps = dependencies(
@@ -395,7 +262,7 @@ describe("Cloudflare custom Container configuration", () => {
     await expect(
       rolloutRunnerApplicationImages(env, "registry.cloudflare.com/account/runner:new", deps, { onProgress: progress }),
     ).resolves.toEqual({
-      updatedApplications: ["runner-standard-3"],
+      updatedApplications: [runnerApplicationName],
       skippedApplications: [],
     });
     expect(progress).toHaveBeenCalledTimes(2);
@@ -405,15 +272,14 @@ describe("Cloudflare custom Container configuration", () => {
     progressError.mockRestore();
   });
 
-  it("uses the current custom-machine resources rather than the stale application list during an image rollout", async () => {
-    const applicationName = "runner-custom";
+  it("uses the freshly read configuration rather than the stale application list during an image rollout", async () => {
     const listed = {
-      ...application(resources, applicationName),
+      ...application(resources, runnerApplicationName),
       health: { instances: { active: 0, assigned: 0, starting: 0, scheduling: 0 } },
     };
     const refreshedResources = { vcpu: 4, memoryMib: 12_288, diskMb: 20_000 };
     const refreshed = {
-      ...application(refreshedResources, applicationName),
+      ...application(refreshedResources, runnerApplicationName),
       max_instances: 3,
       health: { instances: { active: 0, assigned: 0, starting: 0, scheduling: 0 } },
     };
@@ -459,7 +325,7 @@ describe("Cloudflare custom Container configuration", () => {
 
   it("defers an image rollout while a runner or another rollout is active", async () => {
     const busy = {
-      ...application(resources, "runner-standard-3"),
+      ...application(resources, runnerApplicationName),
       health: { instances: { active: 1 } },
     };
     const deps = dependencies(response([busy]), response([busy]), response([]));
@@ -468,7 +334,7 @@ describe("Cloudflare custom Container configuration", () => {
       rolloutRunnerApplicationImages(env, "registry.cloudflare.com/account/runner:new", deps),
     ).resolves.toEqual({
       updatedApplications: [],
-      skippedApplications: ["runner-standard-3"],
+      skippedApplications: [runnerApplicationName],
     });
     expect(deps.fetch).toHaveBeenCalledTimes(3);
   });
@@ -476,7 +342,7 @@ describe("Cloudflare custom Container configuration", () => {
   it("creates a missing rollout after a prior image PATCH reached Cloudflare", async () => {
     const targetImage = "registry.cloudflare.com/account/runner:new";
     const alreadyPatched = {
-      ...application(resources, "runner-standard-3"),
+      ...application(resources, runnerApplicationName),
       configuration: { ...configuration(), image: targetImage },
       health: { instances: { active: 0 } },
     };
@@ -489,7 +355,7 @@ describe("Cloudflare custom Container configuration", () => {
     );
 
     await expect(rolloutRunnerApplicationImages(env, targetImage, deps)).resolves.toEqual({
-      updatedApplications: ["runner-standard-3"],
+      updatedApplications: [runnerApplicationName],
       skippedApplications: [],
     });
     expect(deps.fetch).toHaveBeenCalledTimes(5);
@@ -503,7 +369,7 @@ describe("Cloudflare custom Container configuration", () => {
     const targetImage = "registry.cloudflare.com/account/runner:a";
     const previousImage = "registry.cloudflare.com/account/runner:b";
     const repatched = {
-      ...application(resources, "runner-standard-3"),
+      ...application(resources, runnerApplicationName),
       configuration: { ...configuration(), image: targetImage },
       health: { instances: { active: 0 } },
     };
@@ -521,7 +387,7 @@ describe("Cloudflare custom Container configuration", () => {
     await expect(
       rolloutRunnerApplicationImages(env, targetImage, deps, { reissueMatchingImageRollouts: true }),
     ).resolves.toEqual({
-      updatedApplications: ["runner-standard-3"],
+      updatedApplications: [runnerApplicationName],
       skippedApplications: [],
     });
     expect(deps.fetch.mock.calls[4]?.[1]).toMatchObject({ method: "POST" });
@@ -530,7 +396,7 @@ describe("Cloudflare custom Container configuration", () => {
   it("does not repeat a completed rollout for an unchanged runner image", async () => {
     const targetImage = "registry.cloudflare.com/account/runner:new";
     const deployed = {
-      ...application(resources, "runner-standard-3"),
+      ...application(resources, runnerApplicationName),
       configuration: { ...configuration(), image: targetImage },
       health: { instances: { active: 0 } },
     };
