@@ -18,15 +18,27 @@ scale-to-zero, size labels, R2 caching, remote image builder — is upstream.
 
 ## What changed
 
-### 1. Docker-in-Docker runner image
+### 1. Docker-in-Docker runner image, assembled from a CI-built layout
 
 - `docker/Dockerfile`: install `docker.io` (dockerd + containerd + runc),
   add the `runner` user to the `docker` group, and switch the image to run
-  as root so the entrypoint can start dockerd. Also bumps the pinned
-  actions/runner source to v2.338.2 (`d1eb12d4`): the upstream v2.336.0 pin
-  no longer restores — a high-severity advisory against
-  `System.Security.Cryptography.Pkcs` 10.0.7 makes `dotnet restore` fail
-  with NU1902/NU1903 inside the runner-builder stage.
+  as root so the entrypoint can start dockerd.
+- `.github/workflows/build-runner-layout.yml` (new): upstream compiled
+  actions/runner from source inside the Cloudflare builder, which took 85+
+  minutes on the 4-vCPU Kaniko builder and could not fit the upstream
+  29-minute build round budget. The workflow compiles the patched runner
+  once on a free GitHub-hosted runner and publishes `_layout` as a release
+  asset; the Dockerfile downloads and SHA256-pins that asset, so the
+  Cloudflare-side build only assembles the image (~15 minutes). To bump the
+  runner version, dispatch the workflow with the new version and exact tag
+  commit, then update `RUNNER_VERSION` and `RUNNER_LAYOUT_SHA256` in the
+  Dockerfile. (v2.336.0 also no longer restores: a high-severity advisory
+  against `System.Security.Cryptography.Pkcs` 10.0.7 makes `dotnet restore`
+  fail with NU1902/NU1903.)
+- `src/runner-image-builder.ts`: release the build slot when its Container
+  already stopped — an upstream deadlock where a Workflow that dies mid-build
+  left the slot fenced "active" forever, because destroying a non-running
+  Container throws and every later Workflow joined the dead slot.
 - `docker/start-runner-root.sh` (new): root prelude that enables
   `net.ipv4.ip_forward` (nested-container egress), starts dockerd with
   default configuration, waits for it, then `runuser`s into the unchanged

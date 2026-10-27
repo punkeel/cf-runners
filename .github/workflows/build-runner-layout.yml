@@ -1,0 +1,63 @@
+# Compiles the patched actions/runner layout once and publishes it as a
+# release asset, so the Cloudflare image builder only assembles the runner
+# image instead of compiling .NET inside a 4-vCPU container (85+ minutes).
+# Supply chain: the runner is cloned from the exact tag commit listed below
+# and the asset is pinned by SHA256 in docker/Dockerfile.
+name: Build runner layout
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_version:
+        description: "actions/runner release version (for example 2.338.2)"
+        required: true
+      runner_source_revision:
+        description: "Exact commit hash of the v<runner_version> tag"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  layout:
+    runs-on: ubuntu-latest
+    env:
+      RUNNER_VERSION: ${{ inputs.runner_version }}
+      RUNNER_SOURCE_REVISION: ${{ inputs.runner_source_revision }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libicu74
+
+      - name: Compile the patched runner
+        run: |
+          git clone --depth 1 --branch "v${RUNNER_VERSION}" https://github.com/actions/runner.git "${RUNNER_TEMP}/actions-runner-source"
+          test "$(git -C "${RUNNER_TEMP}/actions-runner-source" rev-parse HEAD)" = "${RUNNER_SOURCE_REVISION}"
+          git -C "${RUNNER_TEMP}/actions-runner-source" apply "${GITHUB_WORKSPACE}/docker/actions-runner-results-proxy.patch"
+          cd "${RUNNER_TEMP}/actions-runner-source/src"
+          ./dev.sh layout Release
+
+      - name: Prune Alpine-only Node copies
+        run: |
+          layout="${RUNNER_TEMP}/actions-runner-source/_layout"
+          test -x "${layout}/externals/node20/bin/node"
+          test -x "${layout}/externals/node24/bin/node"
+          rm -rf "${layout}/externals/node20_alpine" "${layout}/externals/node24_alpine"
+
+      - name: Package
+        run: |
+          tar --create --gzip \
+            --directory "${RUNNER_TEMP}/actions-runner-source" \
+            --file "actions-runner-layout-v${RUNNER_VERSION}-linux-x64.tar.gz" \
+            _layout
+          sha256sum "actions-runner-layout-v${RUNNER_VERSION}-linux-x64.tar.gz"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "runner-layout-v${RUNNER_VERSION}" \
+            --title "Runner layout v${RUNNER_VERSION}" \
+            --notes "Patched actions/runner v${RUNNER_VERSION} (${RUNNER_SOURCE_REVISION}) compiled layout, pruned of Alpine-only Node copies. Pinned by SHA256 in docker/Dockerfile." \
+            "actions-runner-layout-v${RUNNER_VERSION}-linux-x64.tar.gz"

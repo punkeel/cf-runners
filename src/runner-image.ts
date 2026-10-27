@@ -7,7 +7,6 @@ import { parseGitHubRepositoryTarget, type GitHubRepositoryTarget } from "./gith
  */
 export const RUNNER_IMAGE_INPUT_PATHS = [
   "docker/Dockerfile",
-  "docker/actions-runner-results-proxy.patch",
   "docker/start-runner.sh",
   "docker/start-runner-root.sh",
   "docker/invalid-runner-hook.sh",
@@ -62,7 +61,7 @@ const publicRunnerImageOperationalErrors = new Set([
   "Cloudflare image builder bootstrap lost its deployment-scoped claim",
   "Cloudflare did not finish the builder deployment rollout before private bootstrap",
   "Cloudflare did not finish the shared private builder bootstrap",
-  "Cloudflare runner image build did not complete within 120 minutes",
+  "Cloudflare runner image build did not complete within 29 minutes",
   "Cloudflare runner image build queue did not drain after three source builds",
 ]);
 

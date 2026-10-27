@@ -159,7 +159,7 @@ const runnerImageRolloutLeaseMilliseconds = 5 * 60 * 1_000;
 const runnerImageBootstrapLeaseMilliseconds = 60 * 60 * 1_000;
 // Staging can consume the 30-minute build step before the 29-minute detached
 // status window begins. Leave recovery headroom beyond their combined bound.
-const runnerImageBuildLeaseMilliseconds = 150 * 60 * 1_000;
+const runnerImageBuildLeaseMilliseconds = 70 * 60 * 1_000;
 const runnerImageSourceHost = "runner-image-source.internal";
 const runnerImageSourceUrl = `http://${runnerImageSourceHost}/source.tar.gz`;
 
@@ -190,8 +190,7 @@ function runnerImageRegistryManifestUrl(repository: string): string {
 export class RunnerImageBuilder extends Container<WorkerEnvironment> {
   enableInternet = true;
   interceptHttps = true;
-  // Detached image builds can legitimately run for over an hour (compiling
-  // actions/runner from source exceeds the upstream 29-minute round budget). Durable Object
+  // Detached image builds can legitimately run for 29 minutes. Durable Object
   // RPC calls do not renew the Containers SDK activity timer, so the default
   // 10-minute timeout would send SIGTERM to an otherwise healthy Kaniko build.
   sleepAfter = "2h";

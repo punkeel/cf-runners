@@ -51,14 +51,11 @@ const buildStatusStep = {
   timeout: "30 seconds",
 } as const;
 
-const maximumBuildStatusChecks = 720;
+const maximumBuildStatusChecks = 174;
 // A Workflow which arrives behind another source build must wait for it, then
 // acquire a fresh slot and build the currently configured source. Bound this
 // so a sustained push storm produces a useful, non-retryable diagnostic
-// rather than consuming Workflow steps indefinitely. Compiling actions/runner
-// from source plus the docker.io layer needs well over the upstream 29
-// minutes on the 4-vCPU builder (setup-f833303a was still building at 70
-// minutes), so a round is allowed 120 minutes.
+// rather than consuming Workflow steps indefinitely.
 const maximumBuildQueueRounds = 3;
 const maximumRolloutAttempts = 72;
 const maximumBuilderBootstrapRolloutChecks = 360;
@@ -368,7 +365,7 @@ export class RunnerImageBuildWorkflow extends WorkflowEntrypoint<
           await step.sleep(`wait for runner image build ${buildRound}-${attempt}`, "10 seconds");
         }
         if (roundResult === undefined && !predecessorFailed) {
-          throw terminalRunnerImageBuildError("Cloudflare runner image build did not complete within 120 minutes");
+          throw terminalRunnerImageBuildError("Cloudflare runner image build did not complete within 29 minutes");
         }
         if (ownsBuild) {
           completed = roundResult;
