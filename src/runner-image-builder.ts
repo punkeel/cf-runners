@@ -159,7 +159,7 @@ const runnerImageRolloutLeaseMilliseconds = 5 * 60 * 1_000;
 const runnerImageBootstrapLeaseMilliseconds = 60 * 60 * 1_000;
 // Staging can consume the 30-minute build step before the 29-minute detached
 // status window begins. Leave recovery headroom beyond their combined bound.
-const runnerImageBuildLeaseMilliseconds = 70 * 60 * 1_000;
+const runnerImageBuildLeaseMilliseconds = 150 * 60 * 1_000;
 const runnerImageSourceHost = "runner-image-source.internal";
 const runnerImageSourceUrl = `http://${runnerImageSourceHost}/source.tar.gz`;
 
