@@ -394,7 +394,12 @@ export class RunnerImageBuilder extends Container<WorkerEnvironment> {
       return true;
     }
     try {
-      if (destroyContainer && this.ctx.container !== undefined) {
+      // An inactive Container (idle sleep, superseded rollout, or a Workflow
+      // that died mid-build) has nothing left to destroy: the SDK throws when
+      // destroying a non-running Container, which would fence the build slot
+      // on a process that is already gone. Clearing the slot is then safe —
+      // no stale process can touch the workspace paths.
+      if (destroyContainer && this.ctx.container?.running) {
         await this.ctx.container.destroy();
       }
     } catch (error) {
