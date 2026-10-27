@@ -12,7 +12,7 @@
     {
       "binding": "RESOURCE_METRICS",
       "database_name": "cloudflare-github-actions-runner-metrics",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "d0833fd7-b3fd-4cb1-ab07-d8e0847172c2",
       "migrations_dir": "src/migrations",
     },
   ],
