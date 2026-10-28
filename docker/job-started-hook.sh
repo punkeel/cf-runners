@@ -22,7 +22,8 @@ if [ -z "$cache_endpoint" ] || [ -z "$cache_authorization" ]; then
   exit 1
 fi
 
-assignment_endpoint="${cache_endpoint%/v1/runner-cache}/v1/runner-cache-v2/assignment"
+cache_origin=${cache_endpoint%/v1/runner-cache-v2}
+assignment_endpoint="${cache_origin}/v1/runner-cache-v2/assignment"
 # The actual workflow run narrows recovery to its jobs when a webhook is lost.
 # Older images omit this hint and retain the scheduler's candidate fallback.
 workflow_run_id=${GITHUB_RUN_ID:-}

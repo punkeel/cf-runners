@@ -1,38 +1,15 @@
-FROM ubuntu:24.04 AS runner-builder
-
-ARG RUNNER_VERSION=2.336.0
-ARG RUNNER_SOURCE_REVISION=98aabcd429c4e8402406c56ce2d26387fed3b9ce
-
-RUN apt-get update \
-  && apt-get install --yes --no-install-recommends \
-    ca-certificates \
-    curl \
-    git \
-    libicu74 \
-  && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /opt/actions-runner-source
-RUN git clone --depth 1 --branch "v${RUNNER_VERSION}" https://github.com/actions/runner.git . \
-  && test "$(git rev-parse HEAD)" = "${RUNNER_SOURCE_REVISION}"
-COPY docker/actions-runner-results-proxy.patch /tmp/actions-runner-results-proxy.patch
-RUN git apply /tmp/actions-runner-results-proxy.patch \
-  && cd src \
-  && ./dev.sh layout Release
-
-# The runner invokes node20 to evaluate workflow expressions (for example,
-# hashFiles()) and can still execute Node 20 actions during GitHub's temporary
-# Node 24 opt-out. This runner cannot execute Docker container actions, so only
-# the Node copies used inside Alpine container steps are unreachable. Prune
-# those in the builder stage so they are absent from the final image layer.
-RUN test -x /opt/actions-runner-source/_layout/externals/node20/bin/node \
-  && test -x /opt/actions-runner-source/_layout/externals/node24/bin/node \
-  && rm -rf \
-    /opt/actions-runner-source/_layout/externals/node20_alpine \
-    /opt/actions-runner-source/_layout/externals/node24_alpine
-
+# The runner layout (compiled, patched, Alpine-Node-pruned) is published as a
+# release asset by .github/workflows/build-runner-layout.yml and pinned by
+# SHA256 here. Compiling actions/runner inside the 4-vCPU Cloudflare builder
+# took 85+ minutes and could not fit any sane build round budget; assembling
+# the image from the pinned layout takes about 15 minutes.
 FROM ubuntu:24.04
 
-ARG RUNNER_VERSION=2.336.0
+ARG RUNNER_VERSION=2.338.2
+# SHA256 of actions-runner-layout-v${RUNNER_VERSION}-linux-x64.tar.gz from the
+# runner-layout-v${RUNNER_VERSION} release. Rebuild the layout workflow first
+# when bumping RUNNER_VERSION, then update this digest.
+ARG RUNNER_LAYOUT_SHA256=b3bbdd89b0a73d428f597ef1bf3c6a2a0efb6d4d4e92804ecee691fdd86cb7d7
 ARG NODE_VERSION=22.23.2
 ARG NODE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
 
@@ -52,23 +29,28 @@ RUN apt-get update \
     ca-certificates \
     cmake \
     curl \
+    docker.io \
     jq \
     ninja-build \
     openssh-client \
     pkg-config \
     python3 \
     rsync \
-    software-properties-common \
+    sudo \
     tini \
     unzip \
     wget \
     xz-utils \
     zip \
     zstd \
-  && add-apt-repository --yes ppa:git-core/ppa \
-  && apt-get update \
-  && apt-get install --yes --no-install-recommends git git-lfs \
+    git \
+    git-lfs \
   && useradd --create-home --shell /bin/bash runner \
+  && printf '%s\n' 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner \
+  && chmod 0440 /etc/sudoers.d/runner \
+  # Fork (punkeel/cf-runners): the `runner` user talks to the in-container
+  # dockerd started by start-runner-root.sh through the docker group.
+  && usermod --append --groups docker runner \
   && mkdir --parents /home/runner/actions-runner \
   && mkdir --parents "${RUNNER_TOOL_CACHE}/node/${NODE_VERSION}" \
   && curl --fail --location --retry 3 \
@@ -80,25 +62,39 @@ RUN apt-get update \
   && ln --symbolic /usr/local "${RUNNER_TOOL_CACHE}/node/${NODE_VERSION}/x64" \
   && touch "${RUNNER_TOOL_CACHE}/node/${NODE_VERSION}/x64.complete" \
   && corepack enable \
+  && curl --fail --location --retry 3 \
+    --output /tmp/runner-layout.tar.gz \
+    "https://github.com/punkeel/cf-runners/releases/download/runner-layout-v${RUNNER_VERSION}/actions-runner-layout-v${RUNNER_VERSION}-linux-x64.tar.gz" \
+  && echo "${RUNNER_LAYOUT_SHA256}  /tmp/runner-layout.tar.gz" | sha256sum --check --status \
+  && tar --extract --gzip --file /tmp/runner-layout.tar.gz \
+    --directory /home/runner/actions-runner --strip-components=1 \
+  && rm /tmp/runner-layout.tar.gz \
+  # The layout ships only the Node copies reachable from linux-x64 steps.
+  # The runner invokes node20 to evaluate workflow expressions (for example,
+  # hashFiles()) and can still execute Node 20 actions during GitHub's
+  # temporary Node 24 opt-out.
+  && test -x /home/runner/actions-runner/externals/node20/bin/node \
+  && test -x /home/runner/actions-runner/externals/node24/bin/node \
   && rm -rf /var/lib/apt/lists/*
-
-COPY --from=runner-builder --chown=runner:runner /opt/actions-runner-source/_layout/ /home/runner/actions-runner/
 
 RUN /home/runner/actions-runner/bin/installdependencies.sh \
   && rm -rf /var/lib/apt/lists/* \
+  && rm -rf /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
   && chown runner:runner /home/runner/actions-runner \
   && chown --recursive runner:runner "${RUNNER_TOOL_CACHE}"
 
 COPY --chown=runner:runner docker/start-runner.sh /home/runner/start-runner.sh
+COPY docker/start-runner-root.sh /home/runner/start-runner-root.sh
 COPY --chown=runner:runner docker/invalid-runner-hook.sh /home/runner/invalid-runner-hook.sh
 COPY --chown=runner:runner docker/job-started-hook.sh /home/runner/job-started-hook.sh
 COPY docker/report-container-usage.sh /usr/local/bin/report-container-usage
 COPY --chown=runner:runner docker/resource-trace.sh /usr/local/bin/resource-trace
 COPY --chown=runner:runner docker/cf-resource-mark.sh /usr/local/bin/cf-resource-mark
 COPY --chown=runner:runner docker/cf-resource-trace.sh /usr/local/bin/cf-resource-trace
-COPY --chown=runner:runner docker/runner-results-proxy.mjs /usr/local/bin/runner-results-proxy
+COPY docker/runner-results-proxy.mjs /usr/local/bin/runner-results-proxy
 RUN chmod 0755 \
   /home/runner/start-runner.sh \
+  /home/runner/start-runner-root.sh \
   /home/runner/invalid-runner-hook.sh \
   /home/runner/job-started-hook.sh \
   /usr/local/bin/report-container-usage \
@@ -107,7 +103,10 @@ RUN chmod 0755 \
   /usr/local/bin/cf-resource-trace \
   /usr/local/bin/runner-results-proxy
 
-USER runner
+# Fork (punkeel/cf-runners): run as root so the entrypoint can start dockerd
+# and enable ip_forward; it drops back to the `runner` user immediately
+# after. Upstream ran directly as the `runner` user.
+USER root
 WORKDIR /home/runner/actions-runner
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/home/runner/start-runner.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/home/runner/start-runner-root.sh"]

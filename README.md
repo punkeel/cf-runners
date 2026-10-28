@@ -1,18 +1,21 @@
 # Cloudflare Containers GitHub Actions Runner
 
-[![CI](https://badgen.net/github/checks/biw/cloudflare-github-actions-runner)](https://github.com/biw/cloudflare-github-actions-runner/actions)
+[![CI](https://badgen.net/github/checks/punkeel/cf-runners)](https://github.com/punkeel/cf-runners/actions)
 [![npm version](https://badgen.net/npm/v/cloudflare-github-actions-runner)](https://www.npmjs.com/package/cloudflare-github-actions-runner)
 [![npm downloads](https://badgen.net/npm/dt/cloudflare-github-actions-runner)](https://www.npmjs.com/package/cloudflare-github-actions-runner)
 
 Run GitHub Actions jobs in an ephemeral [Cloudflare Containers](https://developers.cloudflare.com/containers/). A signed GitHub App `workflow_job` webhook provisions a repository-scoped GitHub [just-in-time runner](https://docs.github.com/en/actions/reference/security/secure-use#using-just-in-time-runners).
 
-## Quick start
+## Deployment
+
+This fork is deployed from the repository with `cloudflare.config.ts`:
 
 ```sh
-npx -y cloudflare-github-actions-runner@latest
+pnpm install --frozen-lockfile
+CLOUDFLARE_ACCOUNT_ID=<account-id> pnpm run deploy
 ```
 
-The interactive CLI deploys the runner pool and guides you through selecting its GitHub account or organization, creating its GitHub App, and configuring its single private R2 storage bucket with an optional dependency cache.
+The same commands run in GitHub Actions from `.github/workflows/deploy.yml`. The workflow receives only the Cloudflare API token and account ID; GitHub App credentials remain Worker secrets and are never committed or printed by the build.
 
 ## Private repositories only
 
@@ -38,7 +41,7 @@ Use one label directly in a workflow:
 | **`cloudflare-ubuntu-latest`** | `linux/amd64` |    2 |   8 GiB | 16 GB |
 | `cloudflare-standard-4`        | `linux/amd64` |    4 |  12 GiB | 20 GB |
 
-All profiles use the same managed Ubuntu 24.04 runner image. Values come from the [Cloudflare Containers instance types](https://developers.cloudflare.com/containers/platform-details/limits/).
+All profiles use the same managed Ubuntu 24.04 LTS runner image. Values come from the [Cloudflare Containers instance types](https://developers.cloudflare.com/containers/platform-details/limits/).
 
 ### Custom Machines Sizes
 
@@ -65,7 +68,7 @@ The label is self-contained, so different jobs—even in the same workflow—can
 
 ## Caching
 
-The CLI automatically sets up caching to use Cloudflare R2. Use `actions/cache` normally. JavaScript actions, including `actions/cache` and `actions/setup-node`, are transparently backed by the private R2 bucket; artifact uploads and job results continue to use GitHub. PR caches are scoped to their merge ref and can fall back to the default-branch cache, matching GitHub Actions behavior.
+The Worker backs `actions/cache` with a private Cloudflare R2 bucket. JavaScript actions, including `actions/cache` and `actions/setup-node`, use that cache transparently; artifact uploads and job results continue to use GitHub. Pull request caches are scoped to their merge ref and can fall back to the default branch cache.
 
 ```yaml
 jobs:
@@ -83,45 +86,11 @@ jobs:
       - run: pnpm run check
 ```
 
-## What setup does
+## Required secrets
 
-The interactive setup:
+Configure these five Worker secrets once with the Cloudflare dashboard or `wrangler secret put`: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_WEBHOOK_SECRET`, `RESOURCE_TRACE_SIGNING_KEY`, and `RUNNER_CACHE_SIGNING_KEY`. The deployment workflow updates code and container images while preserving those secrets.
 
-1. Verifies your Cloudflare user, account, Containers access, and Docker-free remote builder support.
-2. Lets you select the Cloudflare account that owns and bills for the shared runner pool.
-3. Deploys the Worker, runner profiles, and managed runner image.
-4. Maps the selected Cloudflare account to one GitHub personal account or organization, then creates or reuses that pool's GitHub App. Install it for **All repositories** in that selected account or organization.
-5. Creates one private R2 storage bucket for temporary image-build sources and, optionally, dependency caches with a FIFO quota.
-6. Records a unique installation ID, immutable Cloudflare and GitHub resource IDs, and ownership tags on the Worker, D1 database, and R2 bucket.
-
-- One Cloudflare runner pool serves exactly one GitHub account or organization. Run setup again to create a separate mapping for another Cloudflare account.
-- An App installation covers all selected repositories in that target, including future repositories.
-- App keys, installation tokens, and Cloudflare credentials stay out of runner Containers.
-
-## Teardown
-
-To undo setup from a checkout, run:
-
-```sh
-npx -y cloudflare-github-actions-runner@latest teardown
-```
-
-The interactive command asks which Cloudflare account and which GitHub personal account or organization to inspect.
-
-### Safe teardown with ownership tags
-
-Setup stores a versioned ownership manifest in the deployed Worker's plain-text `RUNNER_RESOURCE_MANIFEST` variable. It records the installation ID and the exact resource names, immutable IDs, image references, and managed R2 prefixes created for that runner pool. The manifest contains resource identities, not API tokens, private keys, or webhook secrets.
-
-Setup also applies two Cloudflare account tags to the Worker, D1 database, and R2 bucket:
-
-- `managed-by=cloudflare-github-actions-runner`
-- `runner-installation-id=<installation UUID>`
-
-These resources act as independently verifiable ownership anchors. Container applications, Workflows, and registry images are tracked by immutable ID or reference in the manifest.
-
-Teardown fails closed.
-
-The selected Cloudflare account and GitHub owner, installation manifest, immutable resource IDs, and both tags on all three ownership anchors must agree before it produces any deletion operations. The Worker queries the Cloudflare Tags API with the account-owned token; that token never leaves the Worker. If any check fails, teardown deletes nothing.
+Install the GitHub App for the configured `GITHUB_RUNNER_OWNER` and enable `workflow_job` webhooks. The app needs Actions read, Administration write, and Checks write permissions so the Worker can create just-in-time runners and report eligibility failures.
 
 ## License
 

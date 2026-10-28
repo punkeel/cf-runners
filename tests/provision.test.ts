@@ -62,6 +62,8 @@ describe("provisionRunner", () => {
         CF_CONTAINER_MEMORY_GIB: "8",
         CF_CONTAINER_DISK_GB: "16",
       },
+      // The instance resources are chosen per start(); the profile supplies them.
+      instance: { vcpu: 2, memoryMib: 8192, diskMb: 16000 },
     });
   });
 
@@ -155,6 +157,8 @@ describe("provisionRunner", () => {
       envVars: expect.objectContaining({
         CF_INVALID_RUNNER_MESSAGE: "- vCPU must be a whole number from 1 through 4.",
       }),
+      // Diagnostic runners use the `basic` instance size.
+      instance: { vcpu: 0.25, memoryMib: 1024, diskMb: 4000 },
     });
   });
 

@@ -1,3 +1,4 @@
+import type { ContainerInstanceSpec } from "./instance-sized-container";
 import type { GitHubRepositoryTarget } from "./github-repository";
 import type { ResourceTraceContainerConfiguration } from "./resource-traces";
 import type { RunnerCacheContainerConfiguration } from "./runner-cache";
@@ -17,7 +18,8 @@ export interface RunnerState {
 
 export interface RunnerContainer {
   getState(): Promise<RunnerState>;
-  start(options: { envVars: Record<string, string> }): Promise<void>;
+  /** The instance shape is chosen per start; the app config fixes none. */
+  start(options: { envVars: Record<string, string>; instance: ContainerInstanceSpec }): Promise<void>;
 }
 
 interface RunnerEnvironmentVariables {
@@ -124,8 +126,16 @@ export async function provisionRunner(
   profile: RunnerProfile,
   dependencies: ProvisionDependencies = defaultDependencies,
 ): Promise<ProvisionResult> {
-  const currentState = await runner.getState();
-  if (currentState.status === "starting" || currentState.status === "running") {
+  let currentState: Awaited<ReturnType<RunnerContainer["getState"]>> | undefined;
+  try {
+    currentState = await runner.getState();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("instance.not_found") && !message.includes("Instance not found")) {
+      throw error;
+    }
+  }
+  if (currentState?.status === "starting" || currentState?.status === "running") {
     return { kind: "already-active", runnerName };
   }
 
@@ -213,6 +223,7 @@ export async function provisionRunner(
     }
     await runner.start({
       envVars,
+      instance: { vcpu: profile.vcpu, memoryMib: profile.memoryMib, diskMb: profile.diskMb },
     });
   } catch (error) {
     console.error("Could not start the GitHub Actions runner container", {

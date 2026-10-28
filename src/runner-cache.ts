@@ -3,10 +3,9 @@ import { z } from "zod";
 import type { GitHubRepositoryTarget } from "./github-repository";
 
 const runnerCacheTokenLifetimeMs = 30 * 60 * 1_000;
-const cacheKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,239}$/u;
 const actionCacheTokenLifetimeMs = 30 * 60 * 1_000;
 
-/** Defaults used by `pnpm run setup` for the optional, private R2 cache. */
+/** Defaults used by the private R2 cache. */
 export const defaultRunnerCacheBucketName = "cloudflare-github-actions-runner-cache";
 export const defaultRunnerCacheMaxBytes = 100_000_000_000;
 export const defaultRunnerCachePrefix = "cloudflare-github-actions-runner";
@@ -19,16 +18,6 @@ export interface RunnerCacheEnvironment {
   RUNNER_CACHE_PREFIX?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   RUNNER_CACHE_QUOTA?: RunnerCacheQuotaNamespace;
-}
-
-export interface CacheQuotaLegacyRecord {
-  objectKey: string;
-  sizeBytes: number;
-  createdAt: number;
-}
-
-export interface CacheQuotaLegacyRecordResult {
-  retained: boolean;
 }
 
 export interface ActionCacheManifest {
@@ -52,7 +41,6 @@ export type CacheQuotaActionCommitResult =
   | { kind: "too-large"; maximumBytes: number };
 
 export interface RunnerCacheQuotaStub {
-  recordLegacyCache(input: CacheQuotaLegacyRecord): Promise<CacheQuotaLegacyRecordResult>;
   commitActionCache(input: CacheQuotaActionCommit): Promise<CacheQuotaActionCommitResult>;
 }
 
@@ -107,8 +95,6 @@ export interface RunnerCacheWriteAuthorizer {
     runId?: string,
   ): Promise<AssignedRunnerCacheScope | undefined>;
   cacheScope?(runnerName: string, repository: string, jobId: string): Promise<RunnerCacheScope | undefined>;
-  /** @deprecated Kept temporarily for direct handler consumers upgrading to scoped access. */
-  canWriteCache?(runnerName: string, repository: string): Promise<boolean>;
 }
 
 interface ActionCacheSession {
@@ -262,21 +248,13 @@ async function hasValidSignature(secret: string, payload: Uint8Array, signature:
   return crypto.subtle.verify("HMAC", key, byteBuffer(signature), byteBuffer(payload));
 }
 
-function validCacheKey(value: string | null): value is string {
-  return value !== null && cacheKeyPattern.test(value);
-}
-
 function validRunnerCacheScope(value: string): boolean {
   return runnerCacheScopeSchema.safeParse(value).success;
 }
 
-function normalizedRepository(repository: string): string {
-  return encodeURIComponent(repository.trim().toLowerCase());
-}
-
 export function runnerCacheEnabled(env: Pick<RunnerCacheEnvironment, "RUNNER_CACHE_ENABLED">): boolean {
   // Existing pools predate this setting; preserve their cache behaviour until
-  // setup explicitly chooses to turn it off.
+  // The deployment can explicitly choose to turn it off.
   return env.RUNNER_CACHE_ENABLED !== "false";
 }
 
@@ -292,30 +270,12 @@ export function runnerCacheMaxBytes(env: Pick<RunnerCacheEnvironment, "RUNNER_CA
   return Number.isSafeInteger(configured) && configured > 0 ? configured : defaultRunnerCacheMaxBytes;
 }
 
-export function runnerCacheLegacyPrefix(env: Pick<RunnerCacheEnvironment, "RUNNER_CACHE_PREFIX">): string {
-  return `${runnerCachePrefix(env)}/npm/`;
-}
-
 export function runnerCacheArchivePrefix(env: Pick<RunnerCacheEnvironment, "RUNNER_CACHE_PREFIX">): string {
   return `${runnerCachePrefix(env)}/actions-cache-v2/archives/`;
 }
 
 export function runnerCacheManifestPrefix(env: Pick<RunnerCacheEnvironment, "RUNNER_CACHE_PREFIX">): string {
   return `${runnerCachePrefix(env)}/actions-cache-v2/`;
-}
-
-export function runnerCacheObjectKey(repository: string, key: string, cachePrefix = defaultRunnerCachePrefix): string {
-  if (!validCacheKey(key)) {
-    throw new Error("Runner cache key is invalid");
-  }
-  return `${cachePrefix}/npm/${normalizedRepository(repository)}/${key}.tar.zst`;
-}
-
-function runnerCacheObjectPrefix(repository: string, prefix: string, cachePrefix: string): string {
-  if (!validCacheKey(prefix)) {
-    throw new Error("Runner cache restore prefix is invalid");
-  }
-  return `${cachePrefix}/npm/${normalizedRepository(repository)}/${prefix}`;
 }
 
 export async function createRunnerCacheAuthorization(
@@ -486,13 +446,7 @@ async function resolveRunnerCacheClaim(
 
   const scope =
     writeAuthorizer.cacheScope === undefined
-      ? (await writeAuthorizer.canWriteCache?.(claim.runnerName, claim.repository)) === true
-        ? {
-            scope: claim.scope,
-            fallbackScope: claim.fallbackScope,
-            writeAllowed: true,
-          }
-        : undefined
+      ? undefined
       : await writeAuthorizer.cacheScope(claim.runnerName, claim.repository, claim.jobId);
   if (scope !== undefined && scope.scope === claim.scope && scope.fallbackScope === claim.fallbackScope) {
     return { claim, writeAllowed: scope.writeAllowed };
@@ -531,7 +485,7 @@ export async function createRunnerCacheContainerConfiguration(
     fallbackScope: assignment.cacheScope.fallbackScope,
   });
   return {
-    endpoint: new URL("/v1/runner-cache", assignment.workerOrigin).toString(),
+    endpoint: new URL("/v1/runner-cache-v2", assignment.workerOrigin).toString(),
     authorization: `Bearer ${authorization}`,
   };
 }
@@ -543,107 +497,6 @@ function json(body: z.core.util.JSONType, status = 200): Response {
 function runnerCacheQuota(env: RunnerCacheEnvironment): RunnerCacheQuotaStub | undefined {
   const accountId = env.CLOUDFLARE_ACCOUNT_ID?.trim();
   return accountId === undefined || accountId === "" ? undefined : env.RUNNER_CACHE_QUOTA?.getByName(accountId);
-}
-
-async function cacheObjectForRestore(
-  bucket: R2Bucket,
-  claim: RunnerCacheClaim,
-  key: string,
-  restorePrefix: string | null,
-  cachePrefix: string,
-): Promise<R2ObjectBody | null> {
-  const exact = await bucket.get(runnerCacheObjectKey(claim.repository, key, cachePrefix));
-  if (exact !== null) {
-    return exact;
-  }
-  if (restorePrefix === null) {
-    return null;
-  }
-  if (!validCacheKey(restorePrefix)) {
-    throw new Error("Runner cache restore prefix is invalid");
-  }
-  const listed = await bucket.list({
-    prefix: runnerCacheObjectPrefix(claim.repository, restorePrefix, cachePrefix),
-    limit: 1_000,
-  });
-  const newest = listed.objects.reduce<R2Object | undefined>(
-    (candidate, object) => (candidate === undefined || object.uploaded > candidate.uploaded ? object : candidate),
-    undefined,
-  );
-  return newest === undefined ? null : await bucket.get(newest.key);
-}
-
-export async function handleRunnerCacheRequest(
-  request: Request,
-  env: RunnerCacheEnvironment,
-  writeAuthorizer: RunnerCacheWriteAuthorizer,
-): Promise<Response> {
-  const claim = await verifyRunnerCacheAuthorization(
-    env.RUNNER_CACHE_SIGNING_KEY,
-    request.headers.get("Authorization"),
-  );
-  if (claim === undefined) {
-    return json({ error: "Unauthorized" }, 401);
-  }
-  const resolved = await resolveRunnerCacheClaim(writeAuthorizer, claim);
-  // The legacy endpoint remains read-compatible for callers which have not
-  // upgraded to scheduler-backed assignments. CacheService v2 always requires
-  // a resolved assignment below.
-  const assignedClaim = resolved?.claim ?? claim;
-  const url = new URL(request.url);
-  const key = url.searchParams.get("key");
-  if (!validCacheKey(key)) {
-    return json({ error: "Invalid cache key" }, 400);
-  }
-
-  if (request.method === "GET") {
-    let cached: R2ObjectBody | null;
-    try {
-      cached = await cacheObjectForRestore(
-        env.RUNNER_CACHE,
-        assignedClaim,
-        key,
-        url.searchParams.get("restore_prefix"),
-        runnerCachePrefix(env),
-      );
-    } catch (error) {
-      return json({ error: error instanceof Error ? error.message : "Invalid cache restore request" }, 400);
-    }
-    if (cached === null) {
-      return json({ error: "Cache miss" }, 404);
-    }
-    const headers = new Headers({
-      "Cache-Control": "no-store",
-      "Content-Type": "application/zstd",
-      "X-Cloudflare-Runner-Cache-Key": cached.key,
-    });
-    cached.writeHttpMetadata(headers);
-    headers.set("Cache-Control", "no-store");
-    return new Response(cached.body, { headers });
-  }
-
-  if (request.method !== "PUT") {
-    return json({ error: "Method not allowed" }, 405);
-  }
-  if (request.body === null) {
-    return json({ error: "Cache upload body is required" }, 400);
-  }
-  if (resolved?.writeAllowed !== true) {
-    return json({ error: "Cache writes are not allowed for this assigned GitHub cache scope" }, 403);
-  }
-  const objectKey = runnerCacheObjectKey(assignedClaim.repository, key, runnerCachePrefix(env));
-  const stored = await env.RUNNER_CACHE.put(objectKey, request.body, {
-    httpMetadata: { contentType: "application/zstd" },
-    customMetadata: { repository: assignedClaim.repository, runner: assignedClaim.runnerName },
-  });
-  const quota = runnerCacheQuota(env);
-  if (quota !== undefined) {
-    const result = await quota.recordLegacyCache({ objectKey, sizeBytes: stored.size, createdAt: Date.now() });
-    if (!result.retained) {
-      return json({ error: `Cache archive exceeds the configured ${runnerCacheMaxBytes(env)} byte R2 limit` }, 413);
-    }
-  }
-  return json({ stored: true }, 201);
 }
 
 async function actionCacheManifestForScope(

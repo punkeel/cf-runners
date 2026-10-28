@@ -2,8 +2,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   githubRepositoryName,
-  githubRunnerTokenBindingName,
-  githubRunnerTokenFor,
   parseGitHubRepositoryTarget,
   runnerPoolAcceptsGitHubRepository,
 } from "../src/github-repository";
@@ -30,28 +28,5 @@ describe("GitHub repository credential routing", () => {
     expect(parseGitHubRepositoryTarget("octo-org")).toBeUndefined();
     expect(parseGitHubRepositoryTarget("octo-org/runner-poc/extra")).toBeUndefined();
     expect(githubRepositoryName({ owner: "octo-org", repository: "runner-poc" })).toBe("octo-org/runner-poc");
-  });
-
-  it("uses a separate secret binding for each GitHub owner", async () => {
-    const biwBinding = await githubRunnerTokenBindingName("biw");
-    const orgBinding = await githubRunnerTokenBindingName("octo-org");
-    const env = { [biwBinding]: "biw-token", [orgBinding]: "org-token" };
-
-    await expect(githubRunnerTokenFor(env, { owner: "biw", repository: "one" })).resolves.toBe("biw-token");
-    await expect(githubRunnerTokenFor(env, { owner: "octo-org", repository: "two" })).resolves.toBe("org-token");
-    await expect(githubRunnerTokenFor(env, { owner: "missing", repository: "three" })).resolves.toBeUndefined();
-  });
-
-  it("uses the original POC token only for its original repository", async () => {
-    const env = {
-      LEGACY_GITHUB_OWNER: "biw",
-      LEGACY_GITHUB_REPOSITORY: "runner-poc",
-      GITHUB_RUNNER_TOKEN: "legacy-token",
-    };
-
-    await expect(githubRunnerTokenFor(env, { owner: "biw", repository: "runner-poc" })).resolves.toBe("legacy-token");
-    await expect(
-      githubRunnerTokenFor(env, { owner: "biw", repository: "another-repository" }),
-    ).resolves.toBeUndefined();
   });
 });

@@ -1,4 +1,5 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflare } from "@cloudflare/vite-plugin";
 import { defineConfig } from "vite-plus";
 
 const toolingIgnorePatterns = [
@@ -19,9 +20,10 @@ const toolingIgnorePatterns = [
 ];
 
 export default defineConfig({
+  plugins: process.env.VITEST === "true" ? [] : [cloudflare()],
   fmt: {
     printWidth: 120,
-    ignorePatterns: [...toolingIgnorePatterns, "worker-configuration.d.ts"],
+    ignorePatterns: toolingIgnorePatterns,
   },
   lint: {
     categories: {
@@ -29,7 +31,7 @@ export default defineConfig({
       perf: "warn",
       suspicious: "warn",
     },
-    ignorePatterns: [...toolingIgnorePatterns, "worker-configuration.d.ts"],
+    ignorePatterns: toolingIgnorePatterns,
     plugins: ["import", "vitest"],
     options: {
       denyWarnings: true,
@@ -68,7 +70,7 @@ export default defineConfig({
   },
   pack: {
     clean: true,
-    entry: ["bin/cloudflare-github-actions-runner.ts"],
+    entry: ["scripts/deploy.ts"],
     format: ["esm"],
     outDir: "dist",
     platform: "node",
@@ -85,14 +87,10 @@ export default defineConfig({
         plugins: [
           cloudflareTest({
             miniflare: {
-              bindings: {
-                RUNNER_CACHE_MAX_BYTES: "20",
-                LEGACY_GITHUB_OWNER: "biw",
-                LEGACY_GITHUB_REPOSITORY: "runner-poc",
-                GITHUB_RUNNER_TOKEN: "assignment-test-token",
-              },
+              compatibilityDate: "2026-08-12",
+              bindings: { RUNNER_CACHE_MAX_BYTES: "20" },
             },
-            wrangler: { configPath: "./wrangler.jsonc" },
+            wrangler: { configPath: "./tests/wrangler.test.jsonc" },
           }),
         ],
         test: {

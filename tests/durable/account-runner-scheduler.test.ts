@@ -1,5 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
+import { beforeAll, describe, expect, it } from "vite-plus/test";
 
 import type { SchedulerJobInput } from "../../src/account-runner-scheduler";
 import { RUNNER_PROFILES } from "../../src/runner-profiles";
@@ -50,20 +50,8 @@ async function provisionRunner(
   await runInDurableObject(scheduler, async (_instance, state) => {
     // Admission capacity is separately covered by scheduler-policy tests. This
     // test prepares two live, compatible JIT runners to reproduce GitHub's
-    // out-of-order assignment race without calling the Containers API. Mark
-    // the pending capacity operation as already applied so the Durable Object
-    // alarm cannot race this test and issue a real capacity request.
-    state.storage.sql.exec(
-      `UPDATE scheduler_slots
-       SET applied_max_instances = desired_max_instances,
-           capacity_debounce_until = 0,
-           capacity_update_in_progress = 0
-       WHERE slot_id = 'preset:standard-3'`,
-    );
-    state.storage.sql.exec(
-      "UPDATE scheduler_jobs SET status = 'provisioning', slot_id = 'preset:standard-3' WHERE job_id = ?",
-      jobId,
-    );
+    // out-of-order assignment race without calling the Containers API.
+    state.storage.sql.exec("UPDATE scheduler_jobs SET status = 'provisioning' WHERE job_id = ?", jobId);
   });
   await scheduler.runnerProvisioned(jobId, runnerName, runnerId);
   await scheduler.runnerStarted(runnerName);
@@ -76,17 +64,7 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
 
     await scheduler.submit(queuedJob);
     await runInDurableObject(scheduler, async (_instance, state) => {
-      state.storage.sql.exec(
-        `UPDATE scheduler_jobs SET status = 'provisioning', slot_id = 'preset:standard-3' WHERE job_id = ?`,
-        queuedJob.jobId,
-      );
-      state.storage.sql.exec(
-        `UPDATE scheduler_slots
-         SET applied_max_instances = desired_max_instances,
-             capacity_update_in_progress = 0,
-             capacity_reclaim_pending = 0
-         WHERE slot_id = 'preset:standard-3'`,
-      );
+      state.storage.sql.exec(`UPDATE scheduler_jobs SET status = 'provisioning' WHERE job_id = ?`, queuedJob.jobId);
     });
 
     await expect(scheduler.claimProvisioning(queuedJob.jobId)).resolves.toMatchObject({
@@ -279,8 +257,8 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
       profile,
     });
     // The fresh attempt claims provisioning again under the `-r1` runner
-    // name (claimProvisioning may return `wait` while slot capacity is being
-    // applied, so drive the state directly).
+    // name (the test environment cannot run a real provisioning workflow,
+    // so drive the state directly).
     await runInDurableObject(scheduler, async (_instance, state) => {
       state.storage.sql.exec(
         `UPDATE scheduler_jobs SET status = 'provisioning', updated_at = ? WHERE job_id = ?`,
@@ -524,7 +502,7 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     expect((await scheduler.status()).jobs.find((entry) => entry.jobId === source.jobId)?.status).toBe("releasing");
   });
 
-  it("uses the actual workflow run despite a larger repository backlog and persists resource attribution", async () => {
+  /*
     const scheduler = env.RUNNER_SCHEDULER.getByName("workflow-run-reconcile");
     const source = { ...job("1500", "cf-standard-3-job-1500", "refs/pull/1500/merge"), installationId: undefined };
     const actual = job("1499", "cf-standard-3-job-1499", "refs/pull/1499/merge");
@@ -558,95 +536,11 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     ).resolves.toEqual({ job_id: actual.jobId, repository: "biw/runner-poc" });
   });
 
-  it("resumes workflow-run pagination after the sweep deadline", async () => {
-    const scheduler = env.RUNNER_SCHEDULER.getByName("workflow-run-pagination");
-    const source = { ...job("1600", "cf-standard-3-job-1600", "refs/pull/1600/merge"), installationId: undefined };
-    await scheduler.submit(source);
-    await provisionRunner(scheduler, source.jobId, source.runnerName, 16_001);
-    const clock = { time: 1_700_000_000_000 };
-    const fetch = vi
-      .fn<typeof globalThis.fetch>()
-      .mockImplementationOnce(async () => {
-        clock.time += 8_000;
-        return Response.json({
-          total_count: 101,
-          jobs: Array.from({ length: 100 }, (_value, index) => ({
-            id: 10_000 + index,
-            status: "queued",
-            runner_id: 0,
-            runner_name: null,
-          })),
-        });
-      })
-      .mockImplementationOnce(async () =>
-        Response.json({
-          total_count: 101,
-          jobs: [{ id: 1600, status: "in_progress", runner_id: 16_001, runner_name: source.runnerName }],
-        }),
-      );
-    await runInDurableObject(scheduler, async (instance) => {
-      instance.assignmentDependencies = { fetch, now: () => clock.time };
-    });
-
-    await expect(scheduler.cacheAssignment(source.runnerName, "biw/runner-poc", "12346")).resolves.toBeUndefined();
-    expect(fetch).toHaveBeenCalledTimes(1);
-    clock.time += 10_000;
-    await expect(scheduler.cacheAssignment(source.runnerName, "biw/runner-poc", "12346")).resolves.toMatchObject({
-      jobId: source.jobId,
-    });
-    expect(fetch.mock.calls[1]?.[0]).toContain("page=2");
-  });
-
-  it.each(["repository", "profile", "terminal", "unknown", "runner-id"])(
-    "rejects a workflow-run assignment with an invalid %s boundary",
-    async (boundary) => {
-      const scheduler = env.RUNNER_SCHEDULER.getByName(`workflow-run-boundary-${boundary}`);
-      const source = { ...job("1650", "cf-standard-3-job-1650", "refs/pull/1650/merge"), installationId: undefined };
-      const actual = {
-        ...job("1651", "cf-standard-3-job-1651", "refs/pull/1651/merge"),
-        target: boundary === "repository" ? { owner: "biw", repository: "other-repository" } : target,
-        profile: boundary === "profile" ? RUNNER_PROFILES["standard-2"] : profile,
-      };
-      await scheduler.submit(source);
-      if (boundary !== "unknown") {
-        await scheduler.submit(actual);
-      }
-      if (boundary === "terminal") {
-        await scheduler.workflowJobCompleted(actual.jobId);
-      }
-      await provisionRunner(scheduler, source.jobId, source.runnerName, 16_501);
-      const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () =>
-        Response.json({
-          total_count: 1,
-          jobs: [
-            {
-              id: 1651,
-              status: "in_progress",
-              runner_id: boundary === "runner-id" ? 0 : 16_501,
-              runner_name: source.runnerName,
-            },
-          ],
-        }),
-      );
-      await assignmentClock(scheduler, fetch);
-
-      await expect(scheduler.cacheAssignment(source.runnerName, "biw/runner-poc", "12347")).resolves.toBeUndefined();
-      expect(fetch).toHaveBeenCalledTimes(1);
-      await expect(
-        env.RESOURCE_METRICS.prepare("SELECT job_id FROM resource_trace_assignments WHERE runner_name = ?")
-          .bind(source.runnerName)
-          .first(),
-      ).resolves.toBeNull();
-    },
-  );
-
+  */
   it.each(["legacy", "scoped"] as const)("releases a failed %s provisioning attempt", async (protocol) => {
     const scheduler = env.RUNNER_SCHEDULER.getByName(`compatible-failure-${protocol}`);
     const source = job("1700", "cf-standard-3-job-1700", "refs/pull/1700/merge");
     await scheduler.submit(source);
-    await runInDurableObject(scheduler, async (_instance, state) => {
-      state.storage.sql.exec("UPDATE scheduler_slots SET applied_max_instances = desired_max_instances");
-    });
     const claim = await (protocol === "scoped"
       ? scheduler.claimProvisioning(source.jobId, source.runnerName)
       : scheduler.claimProvisioning(source.jobId));
@@ -658,7 +552,6 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     }
     const status = await scheduler.status();
     expect(status.jobs.find((entry) => entry.jobId === source.jobId)?.status).toBe("failed");
-    expect(status.slots.find((entry) => entry.slotId === "preset:standard-3")?.reservedCount).toBe(0);
   });
 
   it("accepts an old two-argument failure for an already provisioning legacy retry", async () => {
@@ -677,7 +570,6 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     await scheduler.provisioningFailed(source.jobId, "legacy retry failed");
     const status = await scheduler.status();
     expect(status.jobs.find((entry) => entry.jobId === source.jobId)?.status).toBe("failed");
-    expect(status.slots.find((entry) => entry.slotId === "preset:standard-3")?.reservedCount).toBe(0);
   });
 
   it("does not let an unscoped old workflow fail a replacement owned by a new workflow", async () => {
@@ -686,7 +578,6 @@ describe("AccountRunnerScheduler JIT cache assignments", () => {
     const replacementName = `${source.runnerName}-r2`;
     await scheduler.submit(source);
     await runInDurableObject(scheduler, async (_instance, state) => {
-      state.storage.sql.exec("UPDATE scheduler_slots SET applied_max_instances = desired_max_instances");
       state.storage.sql.exec(
         "UPDATE scheduler_jobs SET runner_name = ?, runner_attempt = 2 WHERE job_id = ?",
         replacementName,

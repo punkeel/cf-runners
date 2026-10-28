@@ -19,11 +19,6 @@ const plan: RunnerProvisioningPlan = {
   workerOrigin: "https://runner.example.workers.dev",
   installationId: 42,
   profile: RUNNER_PROFILES["standard-3"],
-  slotId: "preset:standard-3",
-  applicationName: "cloudflare-github-actions-runner-githubactionsrunner",
-  requiredMaxInstances: 2,
-  capacityGeneration: 3,
-  requiresConfiguration: false,
 };
 
 // SAFETY: every test injects the only dependency that reads the environment,

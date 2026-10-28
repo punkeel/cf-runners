@@ -1,0 +1,79 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-github-actions-runner-tests",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-08-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "CLOUDFLARE_ACCOUNT_ID": "6be2041a37d48a9799c686434f1709f9",
+    "GITHUB_RUNNER_OWNER": "punkeel",
+    "GITHUB_RUNNER_GROUP_ID": "1",
+    "RUNNER_CACHE_ENABLED": "true",
+    "RUNNER_CACHE_MAX_BYTES": "20",
+    "RUNNER_CACHE_PREFIX": "cloudflare-github-actions-runner",
+  },
+  "d1_databases": [
+    {
+      "binding": "RESOURCE_METRICS",
+      "database_name": "cloudflare-github-actions-runner-metrics",
+      "database_id": "d0833fd7-b3fd-4cb1-ab07-d8e0847172c2",
+      "migrations_dir": "../src/migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RUNNER_CACHE",
+      "bucket_name": "cloudflare-github-actions-runner-cache",
+    },
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RUNNER",
+        "class_name": "GitHubActionsRunner",
+      },
+      {
+        "name": "RUNNER_SCHEDULER",
+        "class_name": "AccountRunnerScheduler",
+      },
+      {
+        "name": "RUNNER_ELIGIBILITY_CHECK",
+        "class_name": "RunnerEligibilityCheck",
+      },
+      {
+        "name": "RUNNER_CACHE_QUOTA",
+        "class_name": "RunnerCacheQuota",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "test-v1",
+      "new_sqlite_classes": [
+        "GitHubActionsRunner",
+        "AccountRunnerScheduler",
+        "RunnerEligibilityCheck",
+        "RunnerCacheQuota",
+      ],
+    },
+  ],
+  "containers": [
+    {
+      "name": "cloudflare-github-actions-runner-githubactionsrunner",
+      "class_name": "GitHubActionsRunner",
+      "image": "docker.io/library/ubuntu:24.04",
+      "max_instances": 1,
+    },
+  ],
+  "workflows": [
+    {
+      "binding": "RUNNER_PROVISIONING_WORKFLOW",
+      "name": "cloudflare-github-actions-runner-provisioning-v2",
+      "class_name": "RunnerProvisioningWorkflow",
+      "limits": {
+        "steps": 300,
+      },
+    },
+  ],
+}

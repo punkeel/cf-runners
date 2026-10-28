@@ -76,8 +76,8 @@ const resourceTracePayloadSchema = z
 type ResourceTraceSample = z.infer<typeof resourceTraceSampleSchema>;
 type ResourceTracePayload = z.infer<typeof resourceTracePayloadSchema>;
 
-function hasValue(value: string): boolean {
-  return value.trim().length > 0;
+function hasValue(value: string | undefined): value is string {
+  return value !== undefined && value.trim().length > 0;
 }
 
 function encodeBase64Url(value: Uint8Array): string {
@@ -134,7 +134,7 @@ function byteBuffer(value: Uint8Array): ArrayBuffer {
 }
 
 export async function createResourceTraceAuthorization(
-  secret: string,
+  secret: string | undefined,
   input: Omit<ResourceTraceClaim, "version" | "expiresAt">,
   now = Date.now(),
 ): Promise<string> {

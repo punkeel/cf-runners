@@ -1,11 +1,7 @@
 import { z } from "zod";
 
 import { githubTokenForRunner, type GitHubAppDependencies, type GitHubAppEnvironment } from "./github-app";
-import {
-  githubRunnerTokenFor,
-  type GitHubDynamicSecretEnvironment,
-  type GitHubRepositoryTarget,
-} from "./github-repository";
+import type { GitHubRepositoryTarget } from "./github-repository";
 import { githubHeaders } from "./provision";
 
 const githubJobDetailSchema = z.object({
@@ -31,7 +27,7 @@ export class GitHubJobAssignmentClient {
   private readonly tokens = new Map<number | null, string | undefined>();
 
   constructor(
-    private readonly env: GitHubAppEnvironment & GitHubDynamicSecretEnvironment,
+    private readonly env: GitHubAppEnvironment,
     private readonly target: GitHubRepositoryTarget,
     private readonly deps: GitHubAppDependencies = dependencies,
   ) {}
@@ -46,16 +42,10 @@ export class GitHubJobAssignmentClient {
         return undefined;
       }
       if (!this.tokens.has(installationId)) {
-        const token = await githubTokenForRunner(
-          this.env,
-          this.target,
-          installationId,
-          (target) => githubRunnerTokenFor(this.env, target),
-          {
-            fetch: (input, init) => this.deps.fetch(input, { ...init, signal }),
-            now: this.deps.now,
-          },
-        );
+        const token = await githubTokenForRunner(this.env, installationId, {
+          fetch: (input, init) => this.deps.fetch(input, { ...init, signal }),
+          now: this.deps.now,
+        });
         this.tokens.set(installationId, token);
       }
       const token = this.tokens.get(installationId);

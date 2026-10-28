@@ -52,7 +52,7 @@ describe("runner cache assignment hook", () => {
     const port = await listen(server);
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\nBearer runner-capability\n`, {
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\nBearer runner-capability\n`, {
       mode: 0o600,
     });
     try {
@@ -77,7 +77,7 @@ describe("runner cache assignment hook", () => {
     const port = await listen(server);
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\nBearer runner-capability\n`, {
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\nBearer runner-capability\n`, {
       mode: 0o600,
     });
 
@@ -97,7 +97,7 @@ describe("runner cache assignment hook", () => {
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
     const capability = "Bearer capability-that-must-not-leak";
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\n${capability}\n`, { mode: 0o600 });
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\n${capability}\n`, { mode: 0o600 });
 
     try {
       await expect(runHook(configurationPath)).resolves.toEqual({
@@ -122,7 +122,7 @@ describe("runner cache assignment hook", () => {
     const port = await listen(server);
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\nBearer runner-capability\n`, {
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\nBearer runner-capability\n`, {
       mode: 0o600,
     });
 
@@ -158,7 +158,7 @@ describe("runner cache assignment hook", () => {
     const port = await listen(server);
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\nBearer runner-capability\n`, {
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\nBearer runner-capability\n`, {
       mode: 0o600,
     });
 
@@ -186,7 +186,7 @@ describe("runner cache assignment hook", () => {
     const port = await listen(server);
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\nBearer runner-capability\n`, {
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\nBearer runner-capability\n`, {
       mode: 0o600,
     });
 
@@ -213,7 +213,7 @@ describe("runner cache assignment hook", () => {
     const port = await listen(server);
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\nBearer runner-capability\n`, {
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\nBearer runner-capability\n`, {
       mode: 0o600,
     });
 
@@ -249,7 +249,7 @@ describe("runner cache assignment hook", () => {
     const port = await listen(server);
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\nBearer runner-capability\n`, {
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\nBearer runner-capability\n`, {
       mode: 0o600,
     });
 
@@ -274,7 +274,7 @@ describe("runner cache assignment hook", () => {
     const directory = await mkdtemp(join(tmpdir(), "runner-job-hook-test-"));
     const configurationPath = join(directory, "cache-assignment");
     const capability = "Bearer capability-that-must-not-leak";
-    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache\n${capability}\n`, { mode: 0o600 });
+    await writeFile(configurationPath, `http://127.0.0.1:${port}/v1/runner-cache-v2\n${capability}\n`, { mode: 0o600 });
 
     try {
       const result = await runHook(configurationPath, {

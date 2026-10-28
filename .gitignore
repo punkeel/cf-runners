@@ -2,6 +2,7 @@ node_modules/
 dist/
 .context/
 .wrangler/
+.cloudflare/
 .dev.vars*
 .env*
 coverage/

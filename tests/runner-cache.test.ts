@@ -4,14 +4,10 @@ import { z } from "zod";
 import {
   createRunnerCacheAuthorization,
   createRunnerCacheContainerConfiguration,
-  handleRunnerCacheRequest,
   handleRunnerCacheV2Request,
-  runnerCacheObjectKey,
   verifyRunnerCacheAuthorization,
   type CacheQuotaActionCommit,
   type CacheQuotaActionCommitResult,
-  type CacheQuotaLegacyRecord,
-  type CacheQuotaLegacyRecordResult,
 } from "../src/runner-cache";
 
 const claimInput = {
@@ -54,19 +50,6 @@ function r2MultipartUpload<const Value extends object>(value: Value): R2Multipar
   return value as R2MultipartUpload;
 }
 
-function object(key: string, content: string, uploaded = new Date("2026-08-13T00:00:00Z")): R2ObjectBody {
-  const body = new Response(content).body;
-  if (body === null) {
-    throw new Error("Could not create the R2 test body");
-  }
-  return r2ObjectBody({
-    key,
-    uploaded,
-    body,
-    writeHttpMetadata: vi.fn<(headers: Headers) => void>(),
-  });
-}
-
 function cacheEnvironment<const Bucket extends object>(bucket: Bucket) {
   return {
     RUNNER_CACHE_SIGNING_KEY: "cache-signing-key",
@@ -78,9 +61,6 @@ function cacheEnvironment<const Bucket extends object>(bucket: Bucket) {
     CLOUDFLARE_ACCOUNT_ID: "account-id",
     RUNNER_CACHE_QUOTA: {
       getByName: () => ({
-        recordLegacyCache: vi
-          .fn<(input: CacheQuotaLegacyRecord) => Promise<CacheQuotaLegacyRecordResult>>()
-          .mockResolvedValue({ retained: true }),
         commitActionCache: vi
           .fn<(input: CacheQuotaActionCommit) => Promise<CacheQuotaActionCommitResult>>()
           .mockResolvedValue({ kind: "stored" }),
@@ -93,9 +73,6 @@ function actionCacheEnvironment(bucket: ReturnType<typeof actionCacheBucket>) {
   const environment = cacheEnvironment(bucket);
   environment.RUNNER_CACHE_QUOTA = {
     getByName: () => ({
-      recordLegacyCache: vi
-        .fn<(input: CacheQuotaLegacyRecord) => Promise<CacheQuotaLegacyRecordResult>>()
-        .mockResolvedValue({ retained: true }),
       commitActionCache: vi
         .fn<(input: CacheQuotaActionCommit) => Promise<CacheQuotaActionCommitResult>>()
         .mockImplementation(async ({ manifestKey, manifest, customMetadata }) => {
@@ -238,114 +215,6 @@ describe("runner R2 cache", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("streams an exact repository cache hit through the Worker binding", async () => {
-    const key = "pnpm-linux-x64-node-22-lock";
-    const stored = object(runnerCacheObjectKey(claimInput.repository, key), "compressed-cache");
-    const bucket = {
-      get: vi.fn<(...args: unknown[]) => Promise<R2ObjectBody | null>>().mockResolvedValue(stored),
-      list: vi.fn<(...args: unknown[]) => Promise<R2Objects>>(),
-    };
-
-    const response = await handleRunnerCacheRequest(
-      new Request(`https://runner.example/v1/runner-cache?key=${key}`, {
-        headers: { Authorization: await authorization() },
-      }),
-      cacheEnvironment(bucket),
-      { canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>() },
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.text()).resolves.toBe("compressed-cache");
-    expect(bucket.get).toHaveBeenCalledWith(runnerCacheObjectKey(claimInput.repository, key));
-    expect(bucket.list).not.toHaveBeenCalled();
-  });
-
-  it("uses the newest matching restore prefix only after an exact miss", async () => {
-    const key = "pnpm-linux-x64-node-22-new-lock";
-    const older = {
-      key: runnerCacheObjectKey(claimInput.repository, "pnpm-linux-x64-node-22-old"),
-      uploaded: new Date(1_000),
-    };
-    const newer = {
-      key: runnerCacheObjectKey(claimInput.repository, "pnpm-linux-x64-node-22-newer"),
-      uploaded: new Date(2_000),
-    };
-    const stored = object(newer.key, "fallback-cache", newer.uploaded);
-    const bucket = {
-      get: vi
-        .fn<(...args: unknown[]) => Promise<R2ObjectBody | null>>()
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce(stored),
-      list: vi.fn<(...args: unknown[]) => Promise<R2Objects>>().mockResolvedValue({
-        objects: [r2Object(older), r2Object(newer)],
-        truncated: false,
-        delimitedPrefixes: [],
-      }),
-    };
-
-    const response = await handleRunnerCacheRequest(
-      new Request(`https://runner.example/v1/runner-cache?key=${key}&restore_prefix=pnpm-linux-x64-node-22-`, {
-        headers: { Authorization: await authorization() },
-      }),
-      cacheEnvironment(bucket),
-      { canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>() },
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.text()).resolves.toBe("fallback-cache");
-    expect(bucket.list).toHaveBeenCalledWith({
-      prefix: "cloudflare-github-actions-runner/npm/biw%2Fexample/pnpm-linux-x64-node-22-",
-      limit: 1_000,
-    });
-    expect(bucket.get).toHaveBeenLastCalledWith(newer.key);
-  });
-
-  it("streams uploads to R2 only after scheduler authorization", async () => {
-    const key = "pnpm-linux-x64-node-22-lock";
-    const bucket = {
-      put: vi.fn<(...args: unknown[]) => Promise<R2Object>>().mockResolvedValue(r2Object({ key: "cache", size: 16 })),
-    };
-    const writeAuthorizer = {
-      canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>().mockResolvedValue(true),
-    };
-
-    const response = await handleRunnerCacheRequest(
-      new Request(`https://runner.example/v1/runner-cache?key=${key}`, {
-        method: "PUT",
-        headers: { Authorization: await authorization() },
-        body: "compressed-cache",
-      }),
-      cacheEnvironment(bucket),
-      writeAuthorizer,
-    );
-
-    expect(response.status).toBe(201);
-    expect(writeAuthorizer.canWriteCache).toHaveBeenCalledWith("cf-standard-3-job-42", "biw/example");
-    expect(bucket.put).toHaveBeenCalledWith(
-      runnerCacheObjectKey(claimInput.repository, key),
-      expect.any(ReadableStream),
-      expect.objectContaining({ customMetadata: { repository: "biw/example", runner: "cf-standard-3-job-42" } }),
-    );
-  });
-
-  it("rejects cache uploads before GitHub confirms a default-branch assignment", async () => {
-    const bucket = { put: vi.fn<(...args: unknown[]) => Promise<null>>() };
-    const response = await handleRunnerCacheRequest(
-      new Request("https://runner.example/v1/runner-cache?key=pnpm-linux-x64-node-22-lock", {
-        method: "PUT",
-        headers: { Authorization: await authorization() },
-        body: "compressed-cache",
-      }),
-      cacheEnvironment(bucket),
-      {
-        canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>().mockResolvedValue(false),
-      },
-    );
-
-    expect(response.status).toBe(403);
-    expect(bucket.put).not.toHaveBeenCalled();
-  });
-
   it("gives the Container an endpoint and capability, never R2 credentials", async () => {
     await expect(
       createRunnerCacheContainerConfiguration(
@@ -359,7 +228,7 @@ describe("runner R2 cache", () => {
         },
       ),
     ).resolves.toMatchObject({
-      endpoint: "https://runner.example/v1/runner-cache",
+      endpoint: "https://runner.example/v1/runner-cache-v2",
       authorization: expect.stringMatching(/^Bearer /u),
     });
     await expect(
@@ -381,9 +250,6 @@ describe("runner R2 cache", () => {
     const environment = cacheEnvironment(bucket);
     environment.RUNNER_CACHE_QUOTA = {
       getByName: () => ({
-        recordLegacyCache: vi
-          .fn<(input: CacheQuotaLegacyRecord) => Promise<CacheQuotaLegacyRecordResult>>()
-          .mockResolvedValue({ retained: true }),
         commitActionCache: vi
           .fn<(input: CacheQuotaActionCommit) => Promise<CacheQuotaActionCommitResult>>()
           .mockResolvedValue({ kind: "too-large", maximumBytes: 100 }),
@@ -391,7 +257,9 @@ describe("runner R2 cache", () => {
     };
     const headers = { Authorization: await authorization(), "Content-Type": "application/json" };
     const writeAuthorizer = {
-      canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>().mockResolvedValue(true),
+      cacheScope: vi
+        .fn<(runnerName: string, repository: string, jobId: string) => Promise<TestCacheAssignment["cacheScope"]>>()
+        .mockResolvedValue({ scope: claimInput.scope, writeAllowed: true }),
     };
     const created = await handleRunnerCacheV2Request(
       new Request("https://runner.example/v1/runner-cache-v2/create", {
@@ -434,9 +302,6 @@ describe("runner R2 cache", () => {
     const environment = cacheEnvironment(bucket);
     environment.RUNNER_CACHE_QUOTA = {
       getByName: () => ({
-        recordLegacyCache: vi
-          .fn<(input: CacheQuotaLegacyRecord) => Promise<CacheQuotaLegacyRecordResult>>()
-          .mockResolvedValue({ retained: true }),
         commitActionCache: vi
           .fn<(input: CacheQuotaActionCommit) => Promise<CacheQuotaActionCommitResult>>()
           .mockRejectedValue(new Error("quota Durable Object is temporarily unavailable")),
@@ -444,7 +309,9 @@ describe("runner R2 cache", () => {
     };
     const headers = { Authorization: await authorization(), "Content-Type": "application/json" };
     const writeAuthorizer = {
-      canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>().mockResolvedValue(true),
+      cacheScope: vi
+        .fn<(runnerName: string, repository: string, jobId: string) => Promise<TestCacheAssignment["cacheScope"]>>()
+        .mockResolvedValue({ scope: claimInput.scope, writeAllowed: true }),
     };
     const created = await handleRunnerCacheV2Request(
       new Request("https://runner.example/v1/runner-cache-v2/create", {
@@ -563,7 +430,9 @@ describe("runner R2 cache", () => {
     const bucket = actionCacheBucket();
     const environment = actionCacheEnvironment(bucket);
     const writeAuthorizer = {
-      canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>().mockResolvedValue(true),
+      cacheScope: vi
+        .fn<(runnerName: string, repository: string, jobId: string) => Promise<TestCacheAssignment["cacheScope"]>>()
+        .mockResolvedValue({ scope: claimInput.scope, writeAllowed: true }),
     };
     const headers = { Authorization: await authorization(), "Content-Type": "application/json" };
 
@@ -622,14 +491,15 @@ describe("runner R2 cache", () => {
 
     const archive = await handleRunnerCacheV2Request(new Request(hit.signedDownloadUrl), environment, writeAuthorizer);
     await expect(archive.text()).resolves.toBe("cache-archive");
-    expect(writeAuthorizer.canWriteCache).toHaveBeenCalled();
   });
 
   it("does not allow a valid capability from another runner to use an upload session", async () => {
     const bucket = actionCacheBucket();
     const environment = actionCacheEnvironment(bucket);
     const writeAuthorizer = {
-      canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>().mockResolvedValue(true),
+      cacheScope: vi
+        .fn<(runnerName: string, repository: string, jobId: string) => Promise<TestCacheAssignment["cacheScope"]>>()
+        .mockResolvedValue({ scope: claimInput.scope, writeAllowed: true }),
     };
     const headers = { Authorization: await authorization(), "Content-Type": "application/json" };
     const created = await handleRunnerCacheV2Request(
@@ -970,7 +840,9 @@ describe("runner R2 cache", () => {
     const bucket = actionCacheBucket();
     const environment = actionCacheEnvironment(bucket);
     const writeAuthorizer = {
-      canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>().mockResolvedValue(true),
+      cacheScope: vi
+        .fn<(runnerName: string, repository: string, jobId: string) => Promise<TestCacheAssignment["cacheScope"]>>()
+        .mockResolvedValue({ scope: claimInput.scope, writeAllowed: true }),
     };
     const headers = { Authorization: await authorization(), "Content-Type": "application/json" };
     const key = "Linux-node-22-multipart";
@@ -1052,7 +924,9 @@ describe("runner R2 cache", () => {
     const bucket = actionCacheBucket();
     const environment = actionCacheEnvironment(bucket);
     const writeAuthorizer = {
-      canWriteCache: vi.fn<(runnerName: string, repository: string) => Promise<boolean>>().mockResolvedValue(true),
+      cacheScope: vi
+        .fn<(runnerName: string, repository: string, jobId: string) => Promise<TestCacheAssignment["cacheScope"]>>()
+        .mockResolvedValue({ scope: claimInput.scope, writeAllowed: true }),
     };
     const headers = { Authorization: await authorization(), "Content-Type": "application/json" };
     const key = "Linux-node-22-multipart-error";

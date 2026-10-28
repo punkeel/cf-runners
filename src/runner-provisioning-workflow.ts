@@ -1,15 +1,9 @@
 import { NonRetryableError } from "cloudflare:workflows";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 
-import {
-  CloudflareContainersApiError,
-  getContainerRolloutStatus,
-  prepareRunnerApplication,
-} from "./cloudflare-containers";
 import type { RunnerProvisioningPlan, SchedulerAdmission } from "./account-runner-scheduler";
 import type { WorkerEnvironment } from "./environment";
 import { githubTokenForRunner } from "./github-app";
-import { githubRunnerTokenFor } from "./github-repository";
 import { provisionRunner } from "./provision";
 import { runnerEligibilityFor, type RunnerEligibilityInput, type RunnerEligibilityResult } from "./runner-eligibility";
 import { createResourceTraceContainerConfiguration } from "./resource-traces";
@@ -20,15 +14,6 @@ export interface RunnerProvisioningWorkflowParameters {
   jobId: string;
   runnerName?: string;
 }
-
-const apiStepConfig = {
-  retries: {
-    limit: 5,
-    delay: "10 seconds",
-    backoff: "exponential",
-  },
-  timeout: "2 minutes",
-} as const;
 
 const provisionStepConfig = {
   retries: {
@@ -88,50 +73,11 @@ export async function releaseIfRepositoryIsIneligible(
   return true;
 }
 
-function rethrowNonRetryableApiError(cause: unknown): never {
-  if (
-    cause instanceof CloudflareContainersApiError &&
-    cause.status >= 400 &&
-    cause.status < 500 &&
-    cause.status !== 409
-  ) {
-    throw new NonRetryableError(cause.message);
-  }
-  throw cause;
-}
-
 export type RunnerProvisioningWorkflowResult =
   | { kind: "cancelled" }
   | { kind: "missing" }
   | { kind: "started"; runnerName: string; runnerId: number }
   | { kind: "already-active"; runnerName: string };
-
-async function waitForRollout(
-  env: WorkerEnvironment,
-  step: WorkflowStep,
-  applicationId: string,
-  rolloutId: string,
-): Promise<void> {
-  for (let attempt = 1; attempt <= 120; attempt += 1) {
-    // eslint-disable-next-line no-await-in-loop -- rollout checks must be ordered.
-    const status = await step.do(`check Container rollout ${attempt}`, apiStepConfig, async () => {
-      try {
-        return await getContainerRolloutStatus(env, applicationId, rolloutId);
-      } catch (error) {
-        rethrowNonRetryableApiError(error);
-      }
-    });
-    if (status === "completed") {
-      return;
-    }
-    if (status === "reverted" || status === "replaced") {
-      throw new NonRetryableError(`Container rollout ended with status ${status}`);
-    }
-    // eslint-disable-next-line no-await-in-loop -- each poll follows the previous durable check.
-    await step.sleep(`wait for Container rollout ${attempt}`, "10 seconds");
-  }
-  throw new NonRetryableError("Container rollout did not complete within 20 minutes");
-}
 
 export async function startRunnerProvisioningWorkflows(
   env: WorkerEnvironment,
@@ -146,6 +92,22 @@ export async function startRunnerProvisioningWorkflows(
         retention: { successRetention: "1 day", errorRetention: "7 days" },
       });
     } catch {
+      // Workflow creation can race the control-plane's instance index during
+      // a fresh deployment. Retry the idempotent create before inspecting the
+      // existing handle.
+      try {
+        // eslint-disable-next-line no-await-in-loop -- preserve admission ordering.
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        // eslint-disable-next-line no-await-in-loop -- preserve admission ordering.
+        await env.RUNNER_PROVISIONING_WORKFLOW.create({
+          id: admission.workflowId,
+          params: { jobId: admission.jobId, runnerName: admission.runnerName },
+          retention: { successRetention: "1 day", errorRetention: "7 days" },
+        });
+        continue;
+      } catch {
+        // The workflow may already exist; inspect it below.
+      }
       // eslint-disable-next-line no-await-in-loop -- verify a deterministic workflow ID before continuing.
       const existing = await env.RUNNER_PROVISIONING_WORKFLOW.get(admission.workflowId);
       // eslint-disable-next-line no-await-in-loop -- the status belongs to the workflow just looked up.
@@ -168,7 +130,7 @@ export class RunnerProvisioningWorkflow extends WorkflowEntrypoint<
     const scheduler = schedulerFor(this.env);
     let plan: RunnerProvisioningPlan | undefined;
     for (let attempt = 1; attempt <= 120; attempt += 1) {
-      // eslint-disable-next-line no-await-in-loop -- a custom slot may be configuring for an earlier job.
+      // eslint-disable-next-line no-await-in-loop -- a queued job may still be awaiting FIFO admission.
       const claim = await scheduler.claimProvisioning(event.payload.jobId, event.payload.runnerName);
       if (claim.kind === "provision") {
         plan = claim;
@@ -177,7 +139,7 @@ export class RunnerProvisioningWorkflow extends WorkflowEntrypoint<
       if (claim.kind === "cancelled" || claim.kind === "missing") {
         return claim;
       }
-      // eslint-disable-next-line no-await-in-loop -- wait rather than competing with the owning configuration workflow.
+      // eslint-disable-next-line no-await-in-loop -- wait rather than racing the job's FIFO admission.
       await step.sleep(`wait for scheduler reservation ${attempt}`, "10 seconds");
     }
 
@@ -188,20 +150,6 @@ export class RunnerProvisioningWorkflow extends WorkflowEntrypoint<
     try {
       if (await releaseIfRepositoryIsIneligible(this.env, scheduler, plan)) {
         return { kind: "cancelled" };
-      }
-
-      if (plan.requiresConfiguration) {
-        const prepared = await step.do("prepare runner Container application", apiStepConfig, () =>
-          prepareRunnerApplication(this.env, plan.applicationName, plan.profile, plan.requiredMaxInstances, undefined, {
-            exactMaxInstances: true,
-          }),
-        );
-        if (prepared.kind === "rollout") {
-          await waitForRollout(this.env, step, prepared.applicationId, prepared.rolloutId);
-        }
-        const configuredAdmissions = await scheduler.configurationReady(plan.jobId);
-        const capacityAdmissions = await scheduler.capacityPrepared(plan.slotId, plan.capacityGeneration);
-        await startRunnerProvisioningWorkflows(this.env, [...configuredAdmissions, ...capacityAdmissions]);
       }
 
       const mayStart = await scheduler.canStart(plan.jobId, plan.runnerName);
@@ -220,10 +168,8 @@ export class RunnerProvisioningWorkflow extends WorkflowEntrypoint<
       }
 
       const result = await step.do("create JIT runner and start Container", provisionStepConfig, async () => {
-        const runner = runnerContainerFor(this.env, plan.slotId, plan.runnerName);
-        const token = await githubTokenForRunner(this.env, plan.target, plan.installationId, (legacyTarget) =>
-          githubRunnerTokenFor(this.env, legacyTarget),
-        );
+        const runner = runnerContainerFor(this.env, plan.runnerName);
+        const token = await githubTokenForRunner(this.env, plan.installationId);
         if (token === undefined) {
           throw new NonRetryableError(`No GitHub App installation token is available for ${plan.target.owner}`);
         }

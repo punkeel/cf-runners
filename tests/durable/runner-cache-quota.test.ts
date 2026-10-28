@@ -134,26 +134,4 @@ describe("RunnerCacheQuota", () => {
       env.RUNNER_CACHE.head(winner === first.archiveKey ? second.archiveKey : first.archiveKey),
     ).resolves.toBeNull();
   });
-
-  it("rebuilds a missing Durable Object index from R2 before applying FIFO eviction", async () => {
-    const quota = env.RUNNER_CACHE_QUOTA.getByName("r2-index-recovery");
-    const recovered = actionInput("recovered", "recovered-old", 1);
-    const laterLegacyKey = `${cachePrefix}/npm/biw%2Frunner-poc/later-cache.tar.zst`;
-    const laterLegacy = "later-legacy";
-    await env.RUNNER_CACHE.put(recovered.archiveKey, recovered.content);
-    await env.RUNNER_CACHE.put(recovered.input.manifestKey, JSON.stringify(recovered.input.manifest));
-    await env.RUNNER_CACHE.put(laterLegacyKey, laterLegacy);
-
-    await expect(
-      quota.recordLegacyCache({
-        objectKey: laterLegacyKey,
-        sizeBytes: byteLength(laterLegacy),
-        createdAt: 2,
-      }),
-    ).resolves.toEqual({ retained: true });
-
-    await expect(env.RUNNER_CACHE.head(recovered.archiveKey)).resolves.toBeNull();
-    await expect(env.RUNNER_CACHE.head(recovered.input.manifestKey)).resolves.toBeNull();
-    await expect(env.RUNNER_CACHE.get(laterLegacyKey).then((object) => object?.text())).resolves.toBe(laterLegacy);
-  });
 });

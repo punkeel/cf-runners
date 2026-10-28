@@ -4,15 +4,12 @@ import { z } from "zod";
 import type { WorkerEnvironment } from "./environment";
 import {
   runnerCacheArchivePrefix,
-  runnerCacheLegacyPrefix,
   runnerCacheManifestPrefix,
   runnerCacheMaxBytes,
   runnerCachePrefix,
   type ActionCacheManifest,
   type CacheQuotaActionCommit,
   type CacheQuotaActionCommitResult,
-  type CacheQuotaLegacyRecord,
-  type CacheQuotaLegacyRecordResult,
 } from "./runner-cache";
 
 interface CacheEntryRow {
@@ -90,11 +87,9 @@ export class RunnerCacheQuota extends DurableObject<WorkerEnvironment> {
 
     const manifests = new Map<string, R2Object>();
     const archives = new Map<string, R2Object>();
-    const legacyObjects: R2Object[] = [];
     let cursor: string | undefined;
     const manifestPrefix = runnerCacheManifestPrefix(this.env);
     const archivePrefix = runnerCacheArchivePrefix(this.env);
-    const legacyPrefix = runnerCacheLegacyPrefix(this.env);
     do {
       // eslint-disable-next-line no-await-in-loop -- R2 cursors must be consumed in order.
       const listed = await this.env.RUNNER_CACHE.list({
@@ -107,23 +102,10 @@ export class RunnerCacheQuota extends DurableObject<WorkerEnvironment> {
           manifests.set(object.key, object);
         } else if (object.key.startsWith(archivePrefix)) {
           archives.set(object.key, object);
-        } else if (object.key.startsWith(legacyPrefix)) {
-          legacyObjects.push(object);
         }
       }
       cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor !== undefined);
-
-    for (const object of legacyObjects) {
-      this.ctx.storage.sql.exec(
-        `INSERT OR REPLACE INTO runner_cache_entries (entry_key, archive_key, manifest_key, size_bytes, created_at)
-         VALUES (?, ?, NULL, ?, ?)`,
-        `legacy:${object.key}`,
-        object.key,
-        object.size,
-        object.uploaded.getTime(),
-      );
-    }
 
     for (const [manifestKey, listedManifest] of manifests) {
       // eslint-disable-next-line no-await-in-loop -- manifest validation controls the associated archive entry.
@@ -211,29 +193,6 @@ export class RunnerCacheQuota extends DurableObject<WorkerEnvironment> {
       this.ctx.storage.sql.exec("DELETE FROM runner_cache_entries WHERE entry_key = ?", oldest.entry_key);
       total -= oldest.size_bytes;
     }
-  }
-
-  async recordLegacyCache(input: CacheQuotaLegacyRecord): Promise<CacheQuotaLegacyRecordResult> {
-    return this.serialize(async () => {
-      await this.ensureIndex();
-      this.ctx.storage.sql.exec(
-        `INSERT OR REPLACE INTO runner_cache_entries (entry_key, archive_key, manifest_key, size_bytes, created_at)
-         VALUES (?, ?, NULL, ?, ?)`,
-        `legacy:${input.objectKey}`,
-        input.objectKey,
-        input.sizeBytes,
-        input.createdAt,
-      );
-      await this.enforceQuota();
-      const [retainedEntry] = this.ctx.storage.sql
-        .exec<{ entry_key: string }>(
-          "SELECT entry_key FROM runner_cache_entries WHERE entry_key = ?",
-          `legacy:${input.objectKey}`,
-        )
-        .toArray();
-      const retained = retainedEntry !== undefined;
-      return { retained };
-    });
   }
 
   async commitActionCache(input: CacheQuotaActionCommit): Promise<CacheQuotaActionCommitResult> {

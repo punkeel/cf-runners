@@ -61,7 +61,6 @@ const repositorySchema = z.object({
   default_branch: optionalNonEmptyStringSchema,
 });
 const repositoryPayloadSchema = z.object({ repository: repositorySchema });
-const pushPayloadSchema = repositoryPayloadSchema.extend({ ref: z.string() });
 const workflowJobPayloadSchema = z.object({
   action: z.string().optional().catch(undefined),
   repository: repositorySchema.optional().catch(undefined),
@@ -93,15 +92,6 @@ function parseJsonBody(body: string): z.core.util.JSONType | undefined {
 export function githubRepositoryFromWebhook(body: string): GitHubRepositoryTarget | undefined {
   const parsed = repositoryPayloadSchema.safeParse(parseJsonBody(body));
   return parsed.success ? parseGitHubRepositoryTarget(parsed.data.repository.full_name) : undefined;
-}
-
-export function githubPushFromWebhook(body: string): { repository: GitHubRepositoryTarget; ref: string } | undefined {
-  const parsed = pushPayloadSchema.safeParse(parseJsonBody(body));
-  if (!parsed.success) {
-    return undefined;
-  }
-  const repository = parseGitHubRepositoryTarget(parsed.data.repository.full_name);
-  return repository === undefined ? undefined : { repository, ref: parsed.data.ref };
 }
 
 function installationId(payload: WorkflowJobPayload): number | undefined {
