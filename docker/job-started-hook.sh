@@ -2,6 +2,14 @@
 
 set -eu
 
+assignment_started_ms=$(date +%s%3N)
+log_phase() {
+  [ "${CF_RUNNER_TIMING:-}" = "1" ] || return 0
+  phase=$1
+  now_ms=$(date +%s%3N)
+  printf '%s\n' "CF_RUNNER_PHASE phase=${phase} elapsed_ms=$((now_ms - assignment_started_ms))" >&2
+}
+
 diagnostic_path=${CF_INVALID_RUNNER_DIAGNOSTIC_PATH:-}
 if [ -n "$diagnostic_path" ]; then
   exec /home/runner/invalid-runner-hook.sh
@@ -51,9 +59,11 @@ case "$assignment_poll_seconds" in
 esac
 
 status=000
+assignment_attempts=0
 assignment_deadline_epoch=$(($(date +%s) + assignment_max_attempts))
 attempt=1
 while [ "$attempt" -le "$assignment_max_attempts" ]; do
+  assignment_attempts=$attempt
   remaining_seconds=$((assignment_deadline_epoch - $(date +%s)))
   if [ "$remaining_seconds" -le 0 ]; then
     if [ "$attempt" -eq 1 ]; then
@@ -69,6 +79,7 @@ while [ "$attempt" -le "$assignment_max_attempts" ]; do
   status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time "$request_timeout_seconds" \
     --header "Authorization: $cache_authorization" "$assignment_endpoint" || true)
   if [ "$status" = '200' ]; then
+    log_phase "cache-assignment-ready attempts=${assignment_attempts}"
     exit 0
   fi
   case "$status" in
@@ -94,7 +105,11 @@ while [ "$attempt" -le "$assignment_max_attempts" ]; do
   sleep "$sleep_seconds"
 done
 
-# Still fail closed. The job must not run with a cache capability whose
-# assignment the Worker never confirmed.
-printf '%s\n' "::error title=Cloudflare runner cache assignment::GitHub's runner assignment was not observed within ${assignment_max_attempts} seconds (last Worker status: ${status})."
-exit 1
+log_phase "cache-assignment-timeout attempts=${assignment_attempts} status=${status}"
+
+# GitHub can emit the authoritative `workflow_job: in_progress` webhook only
+# after this pre-job hook lets the runner start. Do not deadlock the entire
+# job waiting for that webhook: the cache Worker remains fail-closed and will
+# return 403 until it has an assignment, while ordinary jobs can proceed.
+printf '%s\n' "::warning title=Cloudflare runner cache assignment::GitHub's runner assignment was not observed within ${assignment_max_attempts} seconds (last Worker status: ${status}); continuing without cache access until the authoritative assignment arrives."
+exit 0

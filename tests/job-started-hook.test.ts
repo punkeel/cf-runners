@@ -113,7 +113,7 @@ describe("runner cache assignment hook", () => {
     }
   });
 
-  it("fails closed after the bounded wait window when GitHub never sends an assignment", async () => {
+  it("lets the job start after the bounded wait window when GitHub never sends an assignment", async () => {
     let attempts = 0;
     const server = createServer((_request, response) => {
       attempts += 1;
@@ -133,9 +133,9 @@ describe("runner cache assignment hook", () => {
           CF_RUNNER_CACHE_ASSIGNMENT_POLL_SECONDS: "0",
         }),
       ).resolves.toEqual({
-        code: 1,
+        code: 0,
         stdout:
-          "::error title=Cloudflare runner cache assignment::GitHub's runner assignment was not observed within 2 seconds (last Worker status: 202).\n",
+          "::warning title=Cloudflare runner cache assignment::GitHub's runner assignment was not observed within 2 seconds (last Worker status: 202); continuing without cache access until the authoritative assignment arrives.\n",
         stderr: "",
       });
       expect(attempts).toBe(2);
@@ -225,9 +225,9 @@ describe("runner cache assignment hook", () => {
           CF_RUNNER_CACHE_ASSIGNMENT_POLL_SECONDS: "0",
         }),
       ).resolves.toEqual({
-        code: 1,
+        code: 0,
         stdout:
-          "::error title=Cloudflare runner cache assignment::GitHub's runner assignment was not observed within 1 seconds (last Worker status: 000).\n",
+          "::warning title=Cloudflare runner cache assignment::GitHub's runner assignment was not observed within 1 seconds (last Worker status: 000); continuing without cache access until the authoritative assignment arrives.\n",
         stderr: "",
       });
       expect(Date.now() - startedAt).toBeLessThan(3_000);
@@ -282,9 +282,9 @@ describe("runner cache assignment hook", () => {
         CF_RUNNER_CACHE_ASSIGNMENT_POLL_SECONDS: "0",
       });
       expect(result).toEqual({
-        code: 1,
+        code: 0,
         stdout:
-          "::error title=Cloudflare runner cache assignment::GitHub's runner assignment was not observed within 2 seconds (last Worker status: 401).\n",
+          "::warning title=Cloudflare runner cache assignment::GitHub's runner assignment was not observed within 2 seconds (last Worker status: 401); continuing without cache access until the authoritative assignment arrives.\n",
         stderr: "",
       });
       expect(result.stdout).not.toContain(capability);
