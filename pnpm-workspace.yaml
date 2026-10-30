@@ -7,9 +7,10 @@ catalog:
   vite-plus: 0.2.8
 minimumReleaseAgeExclude:
   - "@cloudflare/vitest-plugin@1.4.9"
-  - cf@1.0.0-beta.24
-  - miniflare@5.20261023.1-beta
-  - wrangler@4.154.0
+  - cf@1.0.0-beta.26
+  - miniflare@5.20261023.3-beta
+  - wrangler@4.156.0
+  - "@cloudflare/runtime-types@0.1.19"
 overrides:
   vitest: "catalog:"
 peerDependencyRules:

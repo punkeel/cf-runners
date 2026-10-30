@@ -1,10 +1,11 @@
-import { bindings, defineConfig, defineContainer, exports, type UnsafeBinding } from "cf/config";
+import { bindings, defineConfig, defineContainer, exports } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
-const durableObjectBinding = (className: string): UnsafeBinding => ({
-  type: "unsafe:durable_object_namespace",
-  class_name: className,
-});
+const durableObjectBinding = (exportName: string) =>
+  bindings.durableObject({
+    worker: "cloudflare-github-actions-runner",
+    exportName,
+  });
 
 const runnerContainer = defineContainer({
   name: "cloudflare-github-actions-runner-githubactionsrunner",
@@ -30,6 +31,9 @@ export default defineConfig({
       RUNNER_CACHE_ENABLED: bindings.text("true"),
       RUNNER_CACHE_MAX_BYTES: bindings.text("100000000000"),
       RUNNER_CACHE_PREFIX: bindings.text("cloudflare-github-actions-runner"),
+      // Use Cloudflare's documented durable-object DinD mode. Set this to
+      // `legacy` only as a rollback if a workflow needs bridge/NAT egress.
+      RUNNER_DIND_MODE: bindings.text("cloudflare"),
       RESOURCE_METRICS: bindings.d1({
         name: "cloudflare-github-actions-runner-metrics",
         id: "d0833fd7-b3fd-4cb1-ab07-d8e0847172c2",
